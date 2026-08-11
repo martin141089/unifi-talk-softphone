@@ -1,0 +1,47 @@
+name: "UniFi Talk Softphone"
+version: "0.1.0"
+slug: "unifi_talk_softphone"
+description: "SIP-Client & Anrufer-Übersicht für UniFi Talk (Softphone-Workaround für Deutschland) von Martin Henschke"
+url: "https://github.com/martin141089/unifi-talk-softphone"
+
+arch:
+  - amd64
+  - aarch64
+
+startup: services
+boot: auto
+
+# Der SIP-Client muss unter der echten LAN-IP des Docker-Hosts erreichbar sein,
+# damit sein Contact-Header stimmt und die UniFi-Console eingehende INVITEs
+# tatsächlich zustellen kann - im normalen Docker-Bridge-Netz waere die
+# Container-IP fuer die Console nicht erreichbar.
+host_network: true
+
+ingress: true
+ingress_port: 8100
+panel_admin: false
+panel_icon: mdi:phone-in-talk
+panel_title: "UniFi Talk"
+homeassistant_api: true
+
+options:
+  talk_sip_host: ""
+  talk_sip_port: 5060
+  sip_extension: ""
+  sip_password: ""
+  sip_domain: "talk.com"
+  local_sip_port: 5070
+  call_handling: "log_only"
+  notify_on_call: true
+  register_expiry: 300
+
+schema:
+  talk_sip_host: str
+  talk_sip_port: port
+  sip_extension: str
+  sip_password: password
+  sip_domain: str
+  local_sip_port: port
+  call_handling: list(log_only|decline)
+  notify_on_call: bool
+  register_expiry: int

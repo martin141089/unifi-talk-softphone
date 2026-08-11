@@ -1,0 +1,21 @@
+# Changelog
+
+Alle nennenswerten Änderungen an diesem Add-on werden hier dokumentiert.
+
+## [0.1.0]
+
+### Hinzugefügt
+- Erste Version: SIP-Client registriert sich als zusätzliche, passive Extension bei
+  UniFi Talk (über den Third-Party-Device-Workaround, siehe DOCS.md) und erkennt
+  eingehende Anrufe (Anrufer-Nummer, Zeitpunkt).
+- Ingress-Dashboard mit Registrierungsstatus, Anruf-Historie und eingebetteter
+  Schritt-für-Schritt-Anleitung zur SIP-Einrichtung auf der UniFi-Console.
+- Home-Assistant-Benachrichtigung bei eingehendem Anruf (`notify_on_call`, Standard
+  `true`) - als `persistent_notification` sowie als Event `unifi_talk_incoming_call`
+  (Felder `number`, `name`, `ts`) für eigene Automatisierungen.
+- Konfigurierbares Anruf-Verhalten (`call_handling`): `log_only` (Standard - nimmt
+  nichts an, andere Telefone/Apps klingeln normal weiter) oder `decline` (lehnt den
+  Anruf nach dem Loggen aktiv ab).
+- Reines Anruf-Erkennung, kein Audio: Das Add-on führt/beantwortet keine Gespräche -
+  dafür wäre eine zusätzliche WebRTC-Bridge nötig (siehe README, geplanter nächster
+  Schritt).
