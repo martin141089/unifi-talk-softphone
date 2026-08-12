@@ -2,6 +2,21 @@
 
 Alle nennenswerten Änderungen an diesem Add-on werden hier dokumentiert.
 
+## [0.3.9]
+
+### Geändert
+- Diagnose aus 0.3.8 zurückgenommen: Auch mit der Console-IP (`talk_sip_host`)
+  als Ziel-Domain im Request-URI scheitert das Wählen externer Rufnummern
+  weiterhin sofort mit `404 Not Found` (Live-Test mit `0228144115` bestätigt).
+  Die Hypothese "falsche Ziel-Domain" ist damit widerlegt - `dial()` verwendet
+  wieder durchgehend `sip_domain` wie vor 0.3.8. Insgesamt wurden jetzt
+  sieben verschiedene Formate/Ziel-Domains für externe Rufnummern erfolglos
+  getestet (E.164, national, mit/ohne Trunk-Präfix `9`/`00`/`9,`, Console-IP
+  als Domain) - interne 4-stellige Extensions routen dabei zuverlässig unter
+  derselben Konfiguration. Ohne Einblick in das tatsächliche von einem
+  funktionierenden Client (z. B. Groundwire) gesendete INVITE für externe
+  Ziele lässt sich die Ursache nicht weiter eingrenzen.
+
 ## [0.3.8] – Diagnose-Build
 
 ### Geändert
