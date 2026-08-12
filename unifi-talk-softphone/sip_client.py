@@ -483,10 +483,21 @@ class SipClient:
         if queue is not None and "INVITE" in msg.get("CSeq", ""):
             queue.put_nowait(msg)
 
-    async def _wait_invite_final(self, queue, timeout):
+    async def _wait_invite_final(self, queue, timeout, expected_cseq=None):
         """Wartet auf die finale Antwort (Statuscode >= 200) einer INVITE-
         Transaktion, ignoriert vorlaeufige Zwischenantworten (100 Trying, 180
-        Ringing, ...). Gibt None bei Zeitueberschreitung zurueck."""
+        Ringing, ...). Gibt None bei Zeitueberschreitung zurueck.
+
+        expected_cseq filtert zusaetzlich auf die CSeq-Nummer der gerade
+        gestellten Anfrage: die Warteschlange ist nur nach Call-ID sortiert,
+        nicht nach Transaktion, daher kann eine verspaetet eintreffende
+        UDP-Retransmission einer FRUEHEREN Challenge (z.B. der Server sendet
+        den ersten 407 nochmal, weil unser ACK ihn nicht rechtzeitig erreicht
+        hat) sonst faelschlich als Antwort auf eine SPAETERE, bereits
+        authentifizierte Anfrage durchgehen - das fuehrte zu einer
+        vermeintlich zweiten Challenge mit identischem Nonce und in der Folge
+        zu einem ueberlappenden dritten INVITE-Versuch ("500 Overlapping
+        Requests")."""
         deadline = asyncio.get_running_loop().time() + timeout
         while True:
             remaining = deadline - asyncio.get_running_loop().time()
@@ -496,6 +507,8 @@ class SipClient:
                 msg = await asyncio.wait_for(queue.get(), remaining)
             except asyncio.TimeoutError:
                 return None
+            if expected_cseq is not None and msg.cseq_number() != expected_cseq:
+                continue
             if msg.status_code is not None and msg.status_code < 200:
                 continue
             return msg
@@ -657,7 +670,7 @@ class SipClient:
             try:
                 cseq = self._next_cseq()
                 self._send(self._build_invite(target_uri, our_uri, from_tag, call_id, cseq, offer_body))
-                resp = await self._wait_invite_final(queue, timeout=40)
+                resp = await self._wait_invite_final(queue, timeout=40, expected_cseq=cseq)
 
                 # Manche FreeSWITCH-Setups (wie bei UniFi Talk) haengen ein INVITE
                 # ueber mehrere interne Hops (Registrar-Realm, dann ggf. ein
@@ -694,7 +707,7 @@ class SipClient:
                         target_uri, our_uri, from_tag, call_id, cseq, offer_body,
                         auth_headers=list(auth_headers.values()),
                     ))
-                    resp = await self._wait_invite_final(queue, timeout=40)
+                    resp = await self._wait_invite_final(queue, timeout=40, expected_cseq=cseq)
 
                 if resp is not None and resp.status_code in (401, 407):
                     log.warning(

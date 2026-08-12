@@ -2,6 +2,24 @@
 
 Alle nennenswerten Änderungen an diesem Add-on werden hier dokumentiert.
 
+## [0.3.6]
+
+### Behoben
+- **„500 Overlapping Requests" auch bei einem einzelnen, sauberen Anrufversuch
+  (kein Doppel-Tap).** Ursache war eine verspaetete UDP-Retransmission der
+  ERSTEN 407-Challenge (die Console schickt sie erneut, falls unser ACK sie
+  nicht rechtzeitig erreicht) - unser Code wartete pro INVITE-Versuch nur auf
+  "irgendeine Antwort mit CSeq: ... INVITE" fuer die Call-ID, ohne zu pruefen,
+  ob die CSeq-*Nummer* zur gerade gestellten Anfrage passt. Die verspaetete
+  Retransmission (identischer Nonce, alte CSeq) wurde dadurch faelschlich als
+  Antwort auf die bereits authentifizierte Folge-Anfrage gewertet, was einen
+  dritten, ueberlappenden INVITE-Versuch ausloeste. `_wait_invite_final()`
+  verwirft jetzt Antworten mit unpassender CSeq-Nummer und wartet weiter auf
+  die tatsaechliche Antwort. Mit einem gezielten Test nachgestellt (verspaetete
+  Retransmission der ersten Challenge nach dem Senden der zweiten Anfrage) und
+  bestaetigt: vorher fuehrte das zuverlaessig zu einem dritten INVITE, jetzt
+  bleibt es bei den erwarteten zwei.
+
 ## [0.3.5]
 
 ### Behoben
