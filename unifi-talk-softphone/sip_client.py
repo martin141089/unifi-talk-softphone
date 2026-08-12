@@ -336,6 +336,7 @@ class SipClient:
         self._pending = {}
         self._invite_pending = {}
         self._stop = False
+        self._dialing = False
 
     async def start(self):
         self.local_ip = _local_ip_towards(self.host, self.port)
@@ -633,8 +634,13 @@ class SipClient:
         herausfordert). Gibt bei Erfolg die RtpSession zurueck (Call wird als
         aktiv vermerkt); wirft RuntimeError mit einer verstaendlichen
         Fehlermeldung bei Ablehnung/Zeitueberschreitung."""
-        if self.active_call or self.ringing_call:
+        # active_call/ringing_call schuetzen nicht vor zwei *gleichzeitig*
+        # gestarteten dial()-Aufrufen (z.B. Doppel-Tap auf "Anrufen") - keiner
+        # von beiden hat active_call schon gesetzt, solange das erste INVITE
+        # noch auf Antwort wartet. self._dialing schliesst dieses Fenster.
+        if self.active_call or self.ringing_call or self._dialing:
             raise RuntimeError("Es läuft bereits ein Anruf")
+        self._dialing = True
 
         rtp = await _create_rtp_session(self.host, self.port, PCMU)
         try:
@@ -726,6 +732,8 @@ class SipClient:
         except Exception:
             rtp.close()
             raise
+        finally:
+            self._dialing = False
 
     def _build_invite(self, request_uri, from_uri, from_tag, call_id, cseq, sdp_body, auth_headers=None):
         branch = "z9hG4bK" + _gen_token(16)

@@ -2,6 +2,27 @@
 
 Alle nennenswerten Änderungen an diesem Add-on werden hier dokumentiert.
 
+## [0.3.5]
+
+### Behoben
+- **Doppel-Tap auf „Anrufen" loeste zwei parallele Anrufversuche aus.** Die
+  Console beantwortete das mit „500 Overlapping Requests" (bestaetigt der
+  0.3.4-Fix: die Digest-Challenge wird jetzt sauber in einer Runde geloest -
+  das eigentliche INVITE erreichte also durch, scheiterte aber an der
+  Doppelanfrage). Zusaetzlich konnte die zweite Anfrage die globale
+  WebRTC-Verbindung der ersten ueberschreiben, was zu
+  `TypeError: null is not an object (evaluating 'pc.close')` fuehrte, sobald
+  die erste Anfrage antwortete. „Anrufen"/„Annehmen" sind waehrend einer
+  laufenden Anfrage jetzt deaktiviert, und jeder Versuch haelt seine eigene
+  WebRTC-Verbindung in einer lokalen Variable statt nur der geteilten
+  globalen - ein zweiter Versuch kann die erste Verbindung dadurch nicht mehr
+  unbeabsichtigt kappen.
+- Zusaetzliche Absicherung serverseitig: `dial()` blockiert jetzt auch einen
+  zweiten, *gleichzeitig* gestarteten Aufruf (vorher schuetzten
+  `active_call`/`ringing_call` nur vor einem zweiten Anruf, nachdem der erste
+  bereits durch war - waehrend beide noch auf die INVITE-Antwort warteten,
+  war das Fenster offen).
+
 ## [0.3.4]
 
 ### Behoben

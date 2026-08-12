@@ -393,30 +393,46 @@ async function createLocalOffer() {
   return newPc;
 }
 
+// Verhindert, dass ein Doppel-Tap (oder ein Tap waehrend eine vorherige
+// Anfrage noch laeuft, z.B. bei mehreren Auth-Challenge-Runden) zwei parallele
+// Anrufversuche auf denselben Knopf ausloest - die Console beantwortet das
+// sonst mit "500 Overlapping Requests", und lokal kann die zweite Anfrage die
+// globale pc-Variable der ersten ueberschreiben ("pc.close() auf null").
+let callBusy = false;
+
 async function answerCall() {
+  if (callBusy) return;
   if (!checkMicSupport()) { showIdle(); return; }
+  callBusy = true;
+  document.getElementById("btn-answer").disabled = true;
+  let myPc = null;
   try {
-    pc = await createLocalOffer();
+    myPc = await createLocalOffer();
+    pc = myPc;
     const resp = await fetch("webrtc/offer", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
+      body: JSON.stringify({ sdp: myPc.localDescription.sdp, type: myPc.localDescription.type }),
     });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
       alert("Anruf konnte nicht angenommen werden: " + (err.error || resp.status));
-      pc.close();
-      pc = null;
+      myPc.close();
+      if (pc === myPc) pc = null;
       showIdle();
       return;
     }
     const answer = await resp.json();
-    await pc.setRemoteDescription(answer);
+    await myPc.setRemoteDescription(answer);
     showActive();
   } catch (e) {
     alert("Annehmen fehlgeschlagen: " + e);
-    if (pc) { pc.close(); pc = null; }
+    if (myPc) myPc.close();
+    if (pc === myPc) pc = null;
     showIdle();
+  } finally {
+    callBusy = false;
+    document.getElementById("btn-answer").disabled = false;
   }
 }
 
@@ -432,11 +448,16 @@ async function hangupCall() {
 }
 
 async function dialCall() {
+  if (callBusy) return;
   const number = document.getElementById("dial-number").value.trim();
   if (!number) { alert("Bitte eine Rufnummer eingeben."); return; }
   if (!checkMicSupport()) return;
+  callBusy = true;
+  document.getElementById("btn-dial").disabled = true;
+  let myPc = null;
   try {
-    pc = await createLocalOffer();
+    myPc = await createLocalOffer();
+    pc = myPc;
 
     document.getElementById("active-text").textContent = "Rufe an: " + number + " ...";
     document.getElementById("ringing-banner").style.display = "none";
@@ -446,23 +467,27 @@ async function dialCall() {
     const resp = await fetch("call/dial", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ number: number, sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
+      body: JSON.stringify({ number: number, sdp: myPc.localDescription.sdp, type: myPc.localDescription.type }),
     });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
       alert("Anruf fehlgeschlagen: " + (err.error || resp.status));
-      pc.close();
-      pc = null;
+      myPc.close();
+      if (pc === myPc) pc = null;
       showIdle();
       return;
     }
     const answer = await resp.json();
-    await pc.setRemoteDescription(answer);
+    await myPc.setRemoteDescription(answer);
     document.getElementById("active-text").textContent = "Verbunden mit " + number;
   } catch (e) {
     alert("Anrufen fehlgeschlagen: " + e);
-    if (pc) { pc.close(); pc = null; }
+    if (myPc) myPc.close();
+    if (pc === myPc) pc = null;
     showIdle();
+  } finally {
+    callBusy = false;
+    document.getElementById("btn-dial").disabled = false;
   }
 }
 
