@@ -374,10 +374,20 @@ async function createLocalOffer() {
 
   const offer = await newPc.createOffer();
   await newPc.setLocalDescription(offer);
+  // Nicht endlos warten: in manchen Mobilfunknetzen wird UDP zum TURN-Server
+  // gedrosselt/blockiert, wodurch das ICE-Gathering nie "complete" meldet -
+  // das liesse den Knopf ohne jede Fehlermeldung haengen. Nach 3s wird mit
+  // den bis dahin gesammelten Kandidaten weitergemacht (fehlt der TURN-Kandidat,
+  // schlaegt die Verbindung spaeter mit einer sichtbaren Fehlermeldung fehl,
+  // statt den Knopf stumm zu blockieren).
   await new Promise((resolve) => {
     if (newPc.iceGatheringState === "complete") return resolve();
+    const timer = setTimeout(resolve, 3000);
     newPc.addEventListener("icegatheringstatechange", () => {
-      if (newPc.iceGatheringState === "complete") resolve();
+      if (newPc.iceGatheringState === "complete") {
+        clearTimeout(timer);
+        resolve();
+      }
     });
   });
   return newPc;
@@ -553,6 +563,7 @@ async def webrtc_offer(request):
     try:
         rtp = await SIP_CLIENT.answer_ringing_call()
     except RuntimeError as e:
+        log.warning("Anruf konnte nicht angenommen werden: %s", e)
         return web.json_response({"error": str(e)}, status=409)
 
     payload_type = SIP_CLIENT.active_call["payload_type"]
@@ -591,6 +602,7 @@ async def call_dial(request):
     try:
         rtp = await SIP_CLIENT.dial(number)
     except RuntimeError as e:
+        log.warning("Ausgehender Anruf zu %s fehlgeschlagen: %s", number, e)
         return web.json_response({"error": str(e)}, status=502)
 
     payload_type = SIP_CLIENT.active_call["payload_type"]

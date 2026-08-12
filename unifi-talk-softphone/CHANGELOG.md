@@ -2,6 +2,23 @@
 
 Alle nennenswerten Änderungen an diesem Add-on werden hier dokumentiert.
 
+## [0.3.3]
+
+### Behoben
+- **„Anrufen" konnte über Mobilfunk (LTE) komplett wirkungslos bleiben, ohne
+  jede Fehlermeldung.** `createLocalOffer()` wartete beim ICE-Gathering ohne
+  Zeitlimit auf den Zustand "complete" - blockiert das UDP zum TURN-Server
+  (z. B. durch manche Mobilfunknetze), erreicht dieser Zustand nie, und das
+  Promise hing für immer (identisches Symptom wie der Bug aus 0.3.1: "Knopf
+  ohne Funktion", nur mit anderer Ursache). Jetzt wird nach 3 Sekunden mit den
+  bis dahin gesammelten ICE-Kandidaten weitergemacht statt endlos zu warten.
+
+### Geändert
+- Fehlschläge beim Annehmen/Anrufen (`RuntimeError` aus `sip_client.py`,
+  z. B. "486 Busy" oder Zeitüberschreitung) werden jetzt zusätzlich als
+  Server-Log-Zeile ausgegeben, nicht mehr nur als HTTP-Antwort an den Browser
+  - erleichtert die Diagnose über die Add-on-Logs bei zukünftigen Problemen.
+
 ## [0.3.2]
 
 ### Behoben
