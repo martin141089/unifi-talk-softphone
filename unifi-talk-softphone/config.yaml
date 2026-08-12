@@ -1,5 +1,5 @@
 name: "UniFi Talk Softphone"
-version: "0.3.0"
+version: "0.3.1"
 slug: "unifi_talk_softphone"
 description: "SIP-Softphone (annehmen & wählen) für UniFi Talk (Softphone-Workaround für Deutschland) von Martin Henschke"
 url: "https://github.com/martin141089/unifi-talk-softphone"

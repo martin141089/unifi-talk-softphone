@@ -356,6 +356,13 @@ function checkMicSupport() {
 // erzeugen, auf vollstaendiges ICE-Gathering warten (kein Trickle-ICE - der
 // Server erwartet eine bereits vollstaendige Antwort in einem Roundtrip).
 async function createLocalOffer() {
+  // Wichtig: getUserMedia() muss der ALLERERSTE await hier sein. Safari/iOS
+  // verlangt, dass der Mikrofon-Zugriff noch innerhalb der "user activation"
+  // des Klicks angefragt wird - ein vorheriger await (z.B. ein fetch()) reicht
+  // oft schon aus, damit die Aktivierung verfaellt. Die Folge ist nicht ein
+  // Fehler, sondern ein lautlos haengendes Promise ("Knopf ohne Funktion").
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
   const iceResp = await fetch("api/ice-servers");
   const iceServers = await iceResp.json();
   const newPc = new RTCPeerConnection({ iceServers });
@@ -363,7 +370,6 @@ async function createLocalOffer() {
     document.getElementById("remote-audio").srcObject = event.streams[0];
   };
 
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   stream.getTracks().forEach((t) => newPc.addTrack(t, stream));
 
   const offer = await newPc.createOffer();

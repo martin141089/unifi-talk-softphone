@@ -2,6 +2,18 @@
 
 Alle nennenswerten Änderungen an diesem Add-on werden hier dokumentiert.
 
+## [0.3.1]
+
+### Behoben
+- **„Anrufen"-Button reagierte in Safari/iOS auf nichts.** `createLocalOffer()`
+  rief `getUserMedia()` erst NACH einem `await fetch(...)` auf - Safari/iOS
+  verlangt aber, dass der Mikrofon-Zugriff noch innerhalb der User-Activation
+  des Klicks angefragt wird. Die Folge war kein Fehler, sondern ein lautlos
+  haengendes Promise, das nie zur eigentlichen Anfrage an den Server kam
+  (bestaetigt per Server-Log: keine einzige `/call/dial`-Anfrage trotz Klicks).
+  `getUserMedia()` ist jetzt der allererste await in der Funktion. Betraf auch
+  "Annehmen", nicht nur "Anrufen".
+
 ## [0.3.0]
 
 ### Hinzugefügt
