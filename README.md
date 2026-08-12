@@ -1,12 +1,12 @@
 # UniFi Talk Softphone
 
-**Anrufer-Übersicht, Annehmen mit Audio & SIP-Client für UniFi Talk in Home Assistant**
+**Anrufe annehmen & wählen, Anrufer-Übersicht & SIP-Client für UniFi Talk in Home Assistant**
 
 UniFi Talk bietet in Deutschland offiziell keinen Softphone-Modus (Telefonieren über
 PC/Handy-App) und keine API/Webhooks für Anruf-Ereignisse. Dieses Home-Assistant-Add-on
-registriert sich per SIP als zusätzliche Extension bei UniFi Talk, erkennt eingehende
-Anrufe (Anrufer-Nummer, Zeitpunkt) und lässt sie sich optional direkt im
-Home-Assistant-Dashboard annehmen — mit echtem Audio über eine WebRTC-Brücke im Browser.
+registriert sich per SIP als zusätzliche Extension bei UniFi Talk und lässt sich direkt
+im Home-Assistant-Dashboard als echtes Softphone nutzen — eingehende Anrufe annehmen und
+selbst wählen, mit echtem Audio über eine WebRTC-Brücke im Browser.
 
 ***
 
@@ -35,12 +35,13 @@ niemand, greift nach kurzer Zeit das konfigurierte Standardverhalten (loggen ode
 
 * SIP-Registrierung (Digest-Auth) als zusätzliche Extension bei UniFi Talk
 * Erkennung eingehender Anrufe inkl. Anrufer-Nummer und Anzeigename
-* **Anruf im Dashboard annehmen und per Mikrofon/Lautsprecher des Browsers führen**
-  (WebRTC-Brücke; für Zugriff auch von unterwegs nutzt sie Cloudflares gehosteten
-  TURN-Dienst — kein eigener Server, keine Portfreigabe am Router nötig)
+* **Anrufe im Dashboard annehmen UND selbst wählen** — per Mikrofon/Lautsprecher
+  des Browsers (WebRTC-Brücke; für Zugriff auch von unterwegs nutzt sie
+  Cloudflares gehosteten TURN-Dienst — kein eigener Server, keine Portfreigabe
+  am Router nötig)
 * Ingress-Dashboard in der Home-Assistant-Seitenleiste: Registrierungsstatus,
-  Live-Anruf-Banner mit Annehmen/Ablehnen/Auflegen, Anruf-Historie, eingebettete
-  Setup-Anleitung
+  Live-Anruf-Banner mit Annehmen/Ablehnen/Auflegen, Wählfeld, Anruf-Historie,
+  eingebettete Setup-Anleitung
 * Home-Assistant-Benachrichtigung bei eingehendem Anruf (`notify_on_call`) — als
   `persistent_notification` sowie als Event `unifi_talk_incoming_call` für eigene
   Automatisierungen (z. B. Ansage auf einem Lautsprecher oder Push aufs Handy)
@@ -51,11 +52,10 @@ niemand, greift nach kurzer Zeit das konfigurierte Standardverhalten (loggen ode
 
 ## Was dieses Add-on (noch) nicht kann
 
-Es kann eingehende Anrufe annehmen, aber **nicht selbst wählen** (kein aktives
-Anrufen einer Nummer) und immer nur **einen Anruf gleichzeitig**. Telefonie von
+Immer nur **ein Anruf gleichzeitig** (angenommen oder gewählt). Telefonie von
 unterwegs (außerhalb des LAN) braucht zusätzlich einen kostenlosen/günstigen
 Cloudflare-TURN-Key (`cf_turn_key_id`/`cf_turn_api_token`, siehe DOCS.md) — ohne das
-funktioniert das Annehmen nur im selben WLAN/LAN wie der Add-on-Host.
+funktioniert Annehmen/Wählen nur im selben WLAN/LAN wie der Add-on-Host.
 
 ***
 

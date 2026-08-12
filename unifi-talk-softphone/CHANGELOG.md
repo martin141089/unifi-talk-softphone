@@ -2,6 +2,28 @@
 
 Alle nennenswerten Änderungen an diesem Add-on werden hier dokumentiert.
 
+## [0.3.0]
+
+### Hinzugefügt
+- **Ausgehende Anrufe (Wählen).** Neues Eingabefeld + „Anrufen"-Button im
+  Dashboard: `sip_client.py` kann jetzt selbst ein INVITE mit eigenem
+  SDP-Angebot verschicken, wartet auf die finale Antwort (inkl.
+  Digest-Auth-Retry, falls die Console das INVITE herausfordert) und baut bei
+  Erfolg dieselbe WebRTC-Brücke wie beim Annehmen auf. Rückmeldungen wie
+  „486 Busy" landen als verständliche Fehlermeldung im Dashboard.
+- Neuer Endpoint `POST /call/dial` ({"number", "sdp", "type"} → SDP-Antwort
+  oder Fehler).
+
+### Geändert
+- `hangup_active_call()` ist jetzt richtungsunabhängig (funktioniert für
+  angenommene *und* selbst gewählte Anrufe) - dafür wurde das interne
+  Dialog-Datenmodell auf `local_identity`/`remote_identity` vereinheitlicht.
+
+Kompletter Wähl-Flow wurde end-to-end gegen einen simulierten SIP-Server +
+simulierten Browser getestet: INVITE/ACK/200 OK, WebRTC-Aushandlung, Audio in
+beide Richtungen, Auflegen - sowie separat Ablehnung (486) und
+Digest-Auth-Retry.
+
 ## [0.2.2]
 
 ### Behoben

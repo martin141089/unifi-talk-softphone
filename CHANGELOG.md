@@ -6,6 +6,13 @@ Die für Home Assistant maßgebliche Version dieser Datei liegt unter
 [unifi-talk-softphone/CHANGELOG.md](unifi-talk-softphone/CHANGELOG.md) (dort liest der
 Supervisor sie aus).
 
+## [0.3.0]
+
+### Hinzugefügt
+- Ausgehende Anrufe (Wählen) - das Add-on ist damit ein vollwertiges
+  Softphone (annehmen und anrufen). Details siehe
+  [unifi-talk-softphone/CHANGELOG.md](unifi-talk-softphone/CHANGELOG.md).
+
 ## [0.2.1]
 
 ### Geändert

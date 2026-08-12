@@ -293,6 +293,11 @@ def render_dashboard(status, calls):
   <button id="btn-hangup" class="btn-hangup">Auflegen</button>
 </div>
 <div id="idle-text" class="empty">Aktuell klingelt kein Anruf.</div>
+<div id="dial-box" style="margin-top:14px;">
+  <input type="tel" id="dial-number" placeholder="Rufnummer, z. B. +49170..."
+         style="padding:8px 10px;border:1px solid #ccc;border-radius:6px;font-size:.95rem;width:200px;">
+  <button id="btn-dial" class="btn-answer">Anrufen</button>
+</div>
 </div>
 """
         calling_script = """
@@ -334,38 +339,48 @@ async function poll() {
   } catch (e) { /* naechster Versuch in 1.5s */ }
 }
 
-async function answerCall() {
-  try {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      alert(
-        "Mikrofon-Zugriff ist hier nicht verfügbar - das passiert typischerweise in der " +
-        "eingebetteten Ansicht der Home-Assistant-App. Bitte diese Seite stattdessen direkt " +
-        "in Safari/Chrome öffnen (in Home Assistant einloggen, dann in der Seitenleiste auf " +
-        "„UniFi Talk\" klicken).",
-      );
-      showIdle();
-      return;
-    }
+function checkMicSupport() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    alert(
+      "Mikrofon-Zugriff ist hier nicht verfügbar - das passiert typischerweise in der " +
+      "eingebetteten Ansicht der Home-Assistant-App. Bitte diese Seite stattdessen direkt " +
+      "in Safari/Chrome öffnen (in Home Assistant einloggen, dann in der Seitenleiste auf " +
+      "„UniFi Talk\" klicken).",
+    );
+    return false;
+  }
+  return true;
+}
 
-    const iceResp = await fetch("api/ice-servers");
-    const iceServers = await iceResp.json();
-    pc = new RTCPeerConnection({ iceServers });
-    pc.ontrack = (event) => {
-      document.getElementById("remote-audio").srcObject = event.streams[0];
-    };
+// Gemeinsamer Aufbau fuer beide Richtungen: eigenes Mikrofon einbinden, Offer
+// erzeugen, auf vollstaendiges ICE-Gathering warten (kein Trickle-ICE - der
+// Server erwartet eine bereits vollstaendige Antwort in einem Roundtrip).
+async function createLocalOffer() {
+  const iceResp = await fetch("api/ice-servers");
+  const iceServers = await iceResp.json();
+  const newPc = new RTCPeerConnection({ iceServers });
+  newPc.ontrack = (event) => {
+    document.getElementById("remote-audio").srcObject = event.streams[0];
+  };
 
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  stream.getTracks().forEach((t) => newPc.addTrack(t, stream));
 
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    await new Promise((resolve) => {
-      if (pc.iceGatheringState === "complete") return resolve();
-      pc.addEventListener("icegatheringstatechange", () => {
-        if (pc.iceGatheringState === "complete") resolve();
-      });
+  const offer = await newPc.createOffer();
+  await newPc.setLocalDescription(offer);
+  await new Promise((resolve) => {
+    if (newPc.iceGatheringState === "complete") return resolve();
+    newPc.addEventListener("icegatheringstatechange", () => {
+      if (newPc.iceGatheringState === "complete") resolve();
     });
+  });
+  return newPc;
+}
 
+async function answerCall() {
+  if (!checkMicSupport()) { showIdle(); return; }
+  try {
+    pc = await createLocalOffer();
     const resp = await fetch("webrtc/offer", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -400,9 +415,45 @@ async function hangupCall() {
   showIdle();
 }
 
+async function dialCall() {
+  const number = document.getElementById("dial-number").value.trim();
+  if (!number) { alert("Bitte eine Rufnummer eingeben."); return; }
+  if (!checkMicSupport()) return;
+  try {
+    pc = await createLocalOffer();
+
+    document.getElementById("active-text").textContent = "Rufe an: " + number + " ...";
+    document.getElementById("ringing-banner").style.display = "none";
+    document.getElementById("active-banner").style.display = "block";
+    document.getElementById("idle-text").style.display = "none";
+
+    const resp = await fetch("call/dial", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ number: number, sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      alert("Anruf fehlgeschlagen: " + (err.error || resp.status));
+      pc.close();
+      pc = null;
+      showIdle();
+      return;
+    }
+    const answer = await resp.json();
+    await pc.setRemoteDescription(answer);
+    document.getElementById("active-text").textContent = "Verbunden mit " + number;
+  } catch (e) {
+    alert("Anrufen fehlgeschlagen: " + e);
+    if (pc) { pc.close(); pc = null; }
+    showIdle();
+  }
+}
+
 document.getElementById("btn-answer").addEventListener("click", answerCall);
 document.getElementById("btn-decline").addEventListener("click", declineCall);
 document.getElementById("btn-hangup").addEventListener("click", hangupCall);
+document.getElementById("btn-dial").addEventListener("click", dialCall);
 setInterval(poll, 1500);
 poll();
 </script>
@@ -513,6 +564,45 @@ async def webrtc_offer(request):
     return web.json_response({"sdp": answer_sdp, "type": answer_type})
 
 
+async def call_dial(request):
+    """Startet einen ausgehenden Anruf: SIP_CLIENT.dial() haelt die Anfrage
+    offen, bis die Gegenseite abnimmt/ablehnt oder ein Timeout eintritt (bis
+    zu 40s) - das Frontend zeigt waehrenddessen "Rufe an ..." (siehe
+    dialCall() im Dashboard-Skript)."""
+    global ACTIVE_CALL_SESSION
+    if not ENABLE_CALLING or not SIP_CLIENT:
+        return web.json_response({"error": "Telefonie-Funktion ist deaktiviert"}, status=404)
+
+    try:
+        data = await request.json()
+    except json.JSONDecodeError:
+        return web.json_response({"error": "Ungueltiges JSON"}, status=400)
+
+    number = (data.get("number") or "").strip()
+    if not number:
+        return web.json_response({"error": "Keine Rufnummer angegeben"}, status=400)
+
+    try:
+        rtp = await SIP_CLIENT.dial(number)
+    except RuntimeError as e:
+        return web.json_response({"error": str(e)}, status=502)
+
+    payload_type = SIP_CLIENT.active_call["payload_type"]
+    cf_servers = await fetch_cf_ice_servers(request.app["http"])
+    ice_servers = webrtc_bridge.ice_servers_from_cloudflare(cf_servers)
+    call = webrtc_bridge.CallSession(rtp, payload_type, ice_servers)
+    try:
+        answer_sdp, answer_type = await call.accept_offer(data["sdp"], data["type"])
+    except Exception as e:
+        log.exception("WebRTC-Verhandlung fuer ausgehenden Anruf fehlgeschlagen")
+        await call.close()
+        await SIP_CLIENT.hangup_active_call()
+        return web.json_response({"error": f"WebRTC-Verhandlung fehlgeschlagen: {e}"}, status=500)
+
+    ACTIVE_CALL_SESSION = call
+    return web.json_response({"sdp": answer_sdp, "type": answer_type})
+
+
 async def call_decline(request):
     if SIP_CLIENT:
         SIP_CLIENT.decline_ringing_call()
@@ -534,6 +624,7 @@ def build_dashboard_app(http_session):
     app.router.add_get("/api/ringing", api_ringing)
     app.router.add_get("/api/ice-servers", api_ice_servers)
     app.router.add_post("/webrtc/offer", webrtc_offer)
+    app.router.add_post("/call/dial", call_dial)
     app.router.add_post("/call/decline", call_decline)
     app.router.add_post("/call/hangup", call_hangup)
     return app

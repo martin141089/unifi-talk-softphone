@@ -121,22 +121,23 @@ danach:
 
 ## Bekannte Grenzen
 
-- **„Annehmen" funktioniert nicht in der eingebetteten Ansicht der
+- **„Annehmen"/„Anrufen" funktioniert nicht in der eingebetteten Ansicht der
   Home-Assistant-App.** Die App-WebView blockt auf iOS/Android den
   Mikrofon-Zugriff (`navigator.mediaDevices` fehlt) – das Dashboard dafür
   stattdessen direkt in Safari/Chrome öffnen (in Home Assistant einloggen,
   dann in der Seitenleiste auf „UniFi Talk" klicken).
-- **Nur eingehende Anrufe annehmen, kein aktives Wählen.** Das Add-on kann
-  (noch) nicht selbst Nummern anrufen – nur klingelnde Anrufe entgegennehmen.
-- **Immer nur ein Anruf gleichzeitig.** Ein zweiter eingehender Anruf während
-  eines bereits laufenden wird wie gewohnt behandelt (klingelt, loggt), lässt
-  sich aber erst annehmen, wenn der erste beendet ist.
+- **Immer nur ein Anruf gleichzeitig** (angenommen oder gewählt). Ein zweiter
+  eingehender Anruf während eines bereits laufenden wird wie gewohnt
+  behandelt (klingelt, loggt), lässt sich aber erst annehmen, wenn der erste
+  beendet ist.
 - **Telefonie von unterwegs braucht einen Cloudflare-TURN-Key** (siehe
-  Schritt 5) – ohne `cf_turn_key_id`/`cf_turn_api_token` funktioniert das
-  Annehmen nur im selben LAN wie der Add-on-Host.
-- **Ausgehende externe Anrufe** funktionieren über so registrierte
-  Drittanbieter-Geräte laut mehreren Community-Berichten teils nicht
-  zuverlässig (Fehler „486 Busy"). Für den reinen Empfang/Annehmen über dieses
-  Add-on ist das irrelevant.
+  Schritt 5) – ohne `cf_turn_key_id`/`cf_turn_api_token` funktioniert
+  Annehmen/Wählen nur im selben LAN wie der Add-on-Host.
+- **Ausgehende Anrufe können laut mehreren Community-Berichten über so
+  registrierte Drittanbieter-Geräte teils mit „486 Busy" fehlschlagen** -
+  ein bekanntes Risiko dieses Workarounds, nicht etwas, das dieses Add-on
+  softwareseitig umgehen kann. Tritt es auf, hilft meist nur ein Blick in
+  die UniFi-Talk-Konfiguration der Extension (z. B. Klingelgruppen-
+  Zuordnung) oder Geduld bei einem Firmware-Update.
 - Der Workaround ist **inoffiziell** und kann jederzeit von Ubiquiti geändert
   oder entfernt werden.

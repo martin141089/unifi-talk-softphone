@@ -334,6 +334,7 @@ class SipClient:
         self._from_tag = _gen_token(10)
         self._cseq = 1
         self._pending = {}
+        self._invite_pending = {}
         self._stop = False
 
     async def start(self):
@@ -472,6 +473,31 @@ class SipClient:
         fut = self._pending.get((call_id, cseq_num))
         if fut and not fut.done():
             fut.set_result(msg)
+            return
+        # Fuer ausgehende INVITEs (dial()) kann es mehrere Antworten auf
+        # dieselbe (Call-ID, CSeq) geben (z.B. 180 Ringing, dann 200 OK) - die
+        # laufen ueber eine Queue statt eines einzelnen Future, siehe
+        # _wait_invite_final().
+        queue = self._invite_pending.get(call_id)
+        if queue is not None and "INVITE" in msg.get("CSeq", ""):
+            queue.put_nowait(msg)
+
+    async def _wait_invite_final(self, queue, timeout):
+        """Wartet auf die finale Antwort (Statuscode >= 200) einer INVITE-
+        Transaktion, ignoriert vorlaeufige Zwischenantworten (100 Trying, 180
+        Ringing, ...). Gibt None bei Zeitueberschreitung zurueck."""
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return None
+            try:
+                msg = await asyncio.wait_for(queue.get(), remaining)
+            except asyncio.TimeoutError:
+                return None
+            if msg.status_code is not None and msg.status_code < 200:
+                continue
+            return msg
 
     def _handle_request(self, msg: SipMessage):
         if msg.method == "OPTIONS":
@@ -586,29 +612,154 @@ class SipClient:
             to_tag=call["to_tag"], body=answer_body, content_type="application/sdp",
         ))
 
-        self.active_call = {**call, "rtp": rtp, "payload_type": payload_type}
+        our_uri = f"sip:{self.extension}@{self.domain}"
+        self.active_call = {
+            **call, "rtp": rtp, "payload_type": payload_type,
+            # Dialog-Identitaeten fuer ein spaeteres BYE (siehe hangup_active_call) -
+            # wir waren hier die Angerufenen (UAS): unsere lokale Identitaet ist
+            # unsere Extension + der von uns vergebene to_tag, die Gegenseite ist
+            # unveraendert der From-Header des eingehenden INVITE.
+            "local_identity": f"<{our_uri}>;tag={call['to_tag']}",
+            "remote_identity": call["invite_msg"].get("From"),
+        }
         self.ringing_call = None
         return rtp
 
+    async def dial(self, number):
+        """Startet einen ausgehenden Anruf zu number: baut eine eigene
+        RTP-Session auf, schickt ein INVITE mit eigenem SDP-Angebot (PCMU) an
+        die UniFi-Console und wartet auf die finale Antwort (inkl. optionalem
+        Digest-Auth-Retry, falls die Console das INVITE selbst nochmal
+        herausfordert). Gibt bei Erfolg die RtpSession zurueck (Call wird als
+        aktiv vermerkt); wirft RuntimeError mit einer verstaendlichen
+        Fehlermeldung bei Ablehnung/Zeitueberschreitung."""
+        if self.active_call or self.ringing_call:
+            raise RuntimeError("Es läuft bereits ein Anruf")
+
+        rtp = await _create_rtp_session(self.host, self.port, PCMU)
+        try:
+            local_rtp_port = rtp.transport.get_extra_info("sockname")[1]
+            offer_body = _build_sdp_answer(self.local_ip, local_rtp_port, PCMU)
+
+            call_id = _gen_token(16) + "@unifi-talk-softphone"
+            from_tag = _gen_token(10)
+            target_uri = f"sip:{number}@{self.domain}"
+            our_uri = f"sip:{self.extension}@{self.domain}"
+
+            queue = asyncio.Queue()
+            self._invite_pending[call_id] = queue
+            try:
+                cseq = self._next_cseq()
+                self._send(self._build_invite(target_uri, our_uri, from_tag, call_id, cseq, offer_body))
+                resp = await self._wait_invite_final(queue, timeout=40)
+
+                if resp is not None and resp.status_code in (401, 407):
+                    # Jede finale Antwort auf ein INVITE muss per ACK bestaetigt
+                    # werden, auch eine Challenge - erst danach darf mit
+                    # Zugangsdaten in einer NEUEN Transaktion (neue CSeq, gleiche
+                    # Call-ID/gleicher From-Tag) erneut versucht werden.
+                    self._send(self._build_ack(target_uri, our_uri, from_tag, resp.get("To"), call_id, cseq))
+                    challenge_header = "WWW-Authenticate" if resp.status_code == 401 else "Proxy-Authenticate"
+                    params = _parse_digest_challenge(resp.get(challenge_header))
+                    if not params:
+                        raise RuntimeError("Digest-Challenge konnte nicht gelesen werden")
+                    auth_header_name = "Authorization" if resp.status_code == 401 else "Proxy-Authorization"
+                    auth_header = _build_authorization(
+                        self.extension, self.password, "INVITE", target_uri, params, header_name=auth_header_name,
+                    )
+                    cseq = self._next_cseq()
+                    self._send(self._build_invite(
+                        target_uri, our_uri, from_tag, call_id, cseq, offer_body, auth_header=auth_header,
+                    ))
+                    resp = await self._wait_invite_final(queue, timeout=40)
+
+                if resp is None:
+                    raise RuntimeError("Keine Antwort (Zeitüberschreitung)")
+                if resp.status_code != 200:
+                    self._send(self._build_ack(target_uri, our_uri, from_tag, resp.get("To"), call_id, cseq))
+                    raise RuntimeError(f"Anruf nicht angenommen: {resp.status_code} {resp.reason}")
+
+                sdp = _parse_sdp(resp.body)
+                if not sdp:
+                    raise RuntimeError("Keine gültige SDP-Antwort erhalten")
+                rtp.remote_addr = (sdp["ip"], sdp["port"])
+
+                to_header = resp.get("To")
+                self._send(self._build_ack(target_uri, our_uri, from_tag, to_header, call_id, cseq))
+
+                self.active_call = {
+                    "call_id": call_id,
+                    "local_identity": f"<{our_uri}>;tag={from_tag}",
+                    "remote_identity": to_header,
+                    "caller": {"number": number, "name": ""},
+                    "received_at": time.time(),
+                    "rtp": rtp,
+                    "payload_type": PCMU,
+                }
+                return rtp
+            finally:
+                self._invite_pending.pop(call_id, None)
+        except Exception:
+            rtp.close()
+            raise
+
+    def _build_invite(self, request_uri, from_uri, from_tag, call_id, cseq, sdp_body, auth_header=None):
+        branch = "z9hG4bK" + _gen_token(16)
+        lines = [
+            f"INVITE {request_uri} SIP/2.0",
+            f"Via: SIP/2.0/UDP {self.local_ip}:{self.local_port};branch={branch};rport",
+            "Max-Forwards: 70",
+            f"From: <{from_uri}>;tag={from_tag}",
+            f"To: <{request_uri}>",
+            f"Call-ID: {call_id}",
+            f"CSeq: {cseq} INVITE",
+            f"Contact: <sip:{self.extension}@{self.local_ip}:{self.local_port}>",
+            "Content-Type: application/sdp",
+            "User-Agent: unifi-talk-softphone/0.1",
+        ]
+        if auth_header:
+            lines.append(auth_header)
+        body_bytes = sdp_body.encode("utf-8")
+        lines.append(f"Content-Length: {len(body_bytes)}")
+        lines.append("")
+        lines.append(sdp_body)
+        return "\r\n".join(lines)
+
+    def _build_ack(self, request_uri, from_uri, from_tag, to_header, call_id, cseq):
+        branch = "z9hG4bK" + _gen_token(16)
+        lines = [
+            f"ACK {request_uri} SIP/2.0",
+            f"Via: SIP/2.0/UDP {self.local_ip}:{self.local_port};branch={branch};rport",
+            "Max-Forwards: 70",
+            f"From: <{from_uri}>;tag={from_tag}",
+            f"To: {to_header}",
+            f"Call-ID: {call_id}",
+            f"CSeq: {cseq} ACK",
+            "Content-Length: 0",
+            "",
+            "",
+        ]
+        return "\r\n".join(lines)
+
     async def hangup_active_call(self):
-        """Legt einen aktiven (angenommenen) Anruf von unserer Seite auf, indem
-        ein BYE verschickt wird. Wird - wie REGISTER auch - immer an die
-        UniFi-Console (self.host/self.port) geschickt, nicht an eine aus dem
-        Contact-Header der Gegenseite geparste Adresse: die Console agiert als
-        B2BUA, jede Signalisierung laeuft ueber sie."""
+        """Legt einen aktiven Anruf (angenommen oder selbst gewaehlt) von
+        unserer Seite auf, indem ein BYE verschickt wird - immer an die
+        UniFi-Console (self.host/self.port), wie auch REGISTER: die Console
+        agiert als B2BUA, jede Signalisierung laeuft ueber sie. local_identity/
+        remote_identity wurden beim Annehmen (answer_ringing_call) bzw. Waehlen
+        (dial) passend zur jeweiligen Dialog-Rolle hinterlegt."""
         call = self.active_call
         if not call:
             return
 
         cseq = self._next_cseq()
         branch = "z9hG4bK" + _gen_token(16)
-        our_uri = f"sip:{self.extension}@{self.domain}"
         lines = [
             f"BYE sip:{self.domain} SIP/2.0",
             f"Via: SIP/2.0/UDP {self.local_ip}:{self.local_port};branch={branch};rport",
             "Max-Forwards: 70",
-            f"From: <{our_uri}>;tag={call['to_tag']}",
-            f"To: {call['invite_msg'].get('From')}",
+            f"From: {call['local_identity']}",
+            f"To: {call['remote_identity']}",
             f"Call-ID: {call['call_id']}",
             f"CSeq: {cseq} BYE",
             "Content-Length: 0",
