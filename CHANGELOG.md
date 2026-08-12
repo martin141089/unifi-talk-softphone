@@ -6,6 +6,13 @@ Die für Home Assistant maßgebliche Version dieser Datei liegt unter
 [unifi-talk-softphone/CHANGELOG.md](unifi-talk-softphone/CHANGELOG.md) (dort liest der
 Supervisor sie aus).
 
+## [0.2.1]
+
+### Geändert
+- Eigener TURN-Server (coturn) durch Cloudflare Realtime TURN ersetzt - Telefonie
+  von unterwegs braucht dadurch keine Portfreigabe am Router mehr. Details siehe
+  [unifi-talk-softphone/CHANGELOG.md](unifi-talk-softphone/CHANGELOG.md).
+
 ## [0.2.0]
 
 ### Hinzugefügt

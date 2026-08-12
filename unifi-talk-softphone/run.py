@@ -4,8 +4,7 @@ import html
 import json
 import logging
 import os
-import secrets
-import socket
+import re
 import sys
 import time
 from pathlib import Path
@@ -42,18 +41,17 @@ CALL_HANDLING = opts.get("call_handling") or "log_only"
 NOTIFY_ON_CALL = bool(opts.get("notify_on_call", True))
 REGISTER_EXPIRY = int(opts.get("register_expiry") or 300)
 
-# Telefonie (WebRTC-Bruecke via coturn/aiortc) - siehe webrtc_bridge.py. Ohne
-# turn_public_host funktioniert das Annehmen/Telefonieren nur im selben LAN wie
-# der Add-on-Host (reine Host-ICE-Kandidaten); mit turn_public_host (oeffentliche
-# IP/DynDNS-Name + Portfreigabe am Router) auch von unterwegs.
+# Telefonie (WebRTC-Bruecke, siehe webrtc_bridge.py). Fuer die TURN-Relay-Seite
+# (noetig, damit das Annehmen/Telefonieren auch von unterwegs funktioniert, nicht
+# nur im LAN) wird Cloudflares gehosteter TURN-Dienst genutzt (turn.cloudflare.com,
+# Teil von "Cloudflare Realtime") statt eines selbst betriebenen Servers - kein
+# Port-Forwarding noetig. Ohne cf_turn_key_id/cf_turn_api_token funktioniert das
+# Annehmen trotzdem, dann aber nur im selben LAN wie der Add-on-Host (reine
+# Host-ICE-Kandidaten).
 ENABLE_CALLING = bool(opts.get("enable_calling", True))
-TURN_USERNAME = (opts.get("turn_username") or "softphone").strip()
-TURN_PASSWORD = (opts.get("turn_password") or "").strip() or secrets.token_urlsafe(16)
-TURN_PUBLIC_HOST = (opts.get("turn_public_host") or "").strip()
-TURN_RELAY_PORT_START = int(opts.get("turn_relay_port_start") or 49160)
-TURN_RELAY_PORT_END = int(opts.get("turn_relay_port_end") or 49200)
-TURN_PORT = 3478
-TURN_CONFIG_PATH = Path("/data/turnserver.conf")
+CF_TURN_KEY_ID = (opts.get("cf_turn_key_id") or "").strip()
+CF_TURN_API_TOKEN = (opts.get("cf_turn_api_token") or "").strip()
+CF_TURN_TTL = 3600  # Gueltigkeit der kurzlebigen TURN-Zugangsdaten in Sekunden
 
 CALL_LOG_PATH = Path("/data/call_log.json")
 CALL_LOG_LOCK = asyncio.Lock()
@@ -69,7 +67,6 @@ HA_NOTIFICATION_ID = "unifi_talk_incoming_call"
 STATUS = {"registered": False, "last_error": None, "last_change": None}
 SIP_CLIENT = None
 ACTIVE_CALL_SESSION = None
-_SHUTTING_DOWN = False
 
 
 def _on_registered(registered, error):
@@ -173,77 +170,50 @@ def format_ts(ts):
     return datetime.datetime.fromtimestamp(ts).strftime("%d.%m.%Y %H:%M:%S")
 
 
-# --- coturn (TURN/STUN-Relay fuer WebRTC) -----------------------------------
+# --- Cloudflare Realtime TURN ------------------------------------------------
 
-def _resolve_turn_external_ip():
-    """Loest turn_public_host (feste IP oder DynDNS-Name) einmalig beim Start
-    auf - coturn selbst kann keine Hostnamen als external-ip verwenden, nur
-    Adressen. Bei DynDNS wird dadurch jeweils der beim Start aktuelle Wert
-    verwendet (aendert sich die IP waehrenddessen, hilft nur ein Neustart)."""
-    if not TURN_PUBLIC_HOST:
-        return None
-    try:
-        return socket.gethostbyname(TURN_PUBLIC_HOST)
-    except OSError as e:
-        log.warning("turn_public_host '%s' konnte nicht aufgeloest werden: %s", TURN_PUBLIC_HOST, e)
-        return None
+CF_TURN_API = "https://rtc.live.cloudflare.com/v1/turn/keys/{key_id}/credentials/generate-ice-servers"
 
 
-def _write_turn_config():
-    external_ip = _resolve_turn_external_ip()
-    lines = [
-        f"listening-port={TURN_PORT}",
-        "fingerprint",
-        "lt-cred-mech",
-        f"user={TURN_USERNAME}:{TURN_PASSWORD}",
-        "realm=unifi-talk-softphone",
-        f"min-port={TURN_RELAY_PORT_START}",
-        f"max-port={TURN_RELAY_PORT_END}",
-        "no-cli",
-        "no-tls",
-        "no-dtls",
-    ]
-    if external_ip:
-        lines.append(f"external-ip={external_ip}")
-    else:
-        log.warning(
-            "turn_public_host nicht gesetzt (oder nicht aufloesbar) - Telefonie funktioniert "
-            "dadurch nur im selben LAN wie dieser Add-on-Host, nicht von unterwegs.",
-        )
-    TURN_CONFIG_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-async def _log_coturn_output(proc):
-    if proc.stdout:
-        async for line in proc.stdout:
-            log.debug("coturn: %s", line.decode(errors="replace").rstrip())
-    code = await proc.wait()
-    if code != 0 and not _SHUTTING_DOWN:
-        log.warning("coturn wurde mit Exit-Code %s beendet", code)
-
-
-async def _start_coturn():
-    _write_turn_config()
-    proc = await asyncio.create_subprocess_exec(
-        "turnserver", "-c", str(TURN_CONFIG_PATH),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-    )
-    log.info(
-        "coturn (TURN-Server) gestartet auf Port %s (Relay-Range %s-%s)",
-        TURN_PORT, TURN_RELAY_PORT_START, TURN_RELAY_PORT_END,
-    )
-    asyncio.create_task(_log_coturn_output(proc))
-    return proc
-
-
-def _ice_servers_for_browser():
-    host = TURN_PUBLIC_HOST or (SIP_CLIENT.local_ip if SIP_CLIENT else None)
-    if not host:
+async def fetch_cf_ice_servers(http_session):
+    """Holt kurzlebige TURN-Zugangsdaten von Cloudflares gehostetem TURN-Dienst
+    (Teil von "Cloudflare Realtime", vormals "Calls") - ersetzt einen selbst
+    betriebenen TURN-Server, ganz ohne Port-Forwarding am Router. Ohne
+    konfigurierte cf_turn_key_id/cf_turn_api_token (oder bei einem Fehler) wird
+    eine leere Liste zurueckgegeben - WebRTC funktioniert dann nur ueber reine
+    Host-Kandidaten, also nur im selben LAN wie der Add-on-Host."""
+    if not (CF_TURN_KEY_ID and CF_TURN_API_TOKEN):
         return []
-    return [
-        {"urls": f"stun:{host}:{TURN_PORT}"},
-        {"urls": f"turn:{host}:{TURN_PORT}", "username": TURN_USERNAME, "credential": TURN_PASSWORD},
-    ]
+    url = CF_TURN_API.format(key_id=CF_TURN_KEY_ID)
+    try:
+        async with http_session.post(
+            url,
+            headers={"Authorization": f"Bearer {CF_TURN_API_TOKEN}", "Content-Type": "application/json"},
+            json={"ttl": CF_TURN_TTL},
+        ) as r:
+            r.raise_for_status()
+            data = await r.json()
+    except aiohttp.ClientError as e:
+        log.warning("Cloudflare-TURN-Zugangsdaten konnten nicht abgerufen werden: %s", e)
+        return []
+
+    servers = data.get("iceServers") or []
+    if isinstance(servers, dict):
+        servers = [servers]
+
+    # Der alternative Port 53 wird von Browsern blockiert (siehe Cloudflare-Doku)
+    # - ohne Trickle-ICE (wir warten auf vollstaendiges Gathering, siehe
+    # webrtc_bridge.CallSession._wait_ice_complete) fuehrt das sonst nur zu
+    # unnoetigen Timeout-Verzoegerungen beim Verbindungsaufbau. Wichtig: exakt
+    # Port 53 matchen, nicht nur die Zeichenkette ":53" - sonst faellt z.B. Port
+    # 5349 (TURNS) faelschlich mit raus.
+    filtered = []
+    for s in servers:
+        urls = s.get("urls")
+        if isinstance(urls, list):
+            urls = [u for u in urls if not re.search(r":53(?:\?|$)", u)]
+        filtered.append({**s, "urls": urls})
+    return filtered
 
 
 # --- Dashboard ---------------------------------------------------------------
@@ -303,9 +273,10 @@ def render_dashboard(status, calls):
     calling_card = ""
     calling_script = ""
     if ENABLE_CALLING:
-        turn_hint = "" if TURN_PUBLIC_HOST else (
-            '<div class="warn">Kein <code>turn_public_host</code> konfiguriert - Annehmen/Telefonieren '
-            "funktioniert dadurch nur im selben WLAN/LAN wie dieser Add-on-Host, nicht von unterwegs.</div>"
+        turn_hint = "" if (CF_TURN_KEY_ID and CF_TURN_API_TOKEN) else (
+            '<div class="warn">Kein Cloudflare-TURN-Key konfiguriert (<code>cf_turn_key_id</code>/'
+            "<code>cf_turn_api_token</code>) - Annehmen/Telefonieren funktioniert dadurch nur im selben "
+            "WLAN/LAN wie dieser Add-on-Host, nicht von unterwegs.</div>"
         )
         calling_card = f"""
 <div class="card">
@@ -464,9 +435,11 @@ weiter normal klingeln.</li>
 <code>fs_cli -x "user_data 0007@talk.com param password"</code></li>
 <li><strong>In der Add-on-Konfiguration eintragen:</strong> <code>talk_sip_host</code>
 (Management-IP der Console), <code>sip_extension</code>, <code>sip_password</code>.</li>
-<li>Für Telefonie von unterwegs zusätzlich <code>turn_public_host</code> setzen (öffentliche
-IP/DynDNS-Name) und am Router UDP-Port <code>3478</code> sowie die Relay-Port-Range
-(Standard <code>49160-49200</code>) auf diesen Add-on-Host weiterleiten.</li>
+<li>Für Telefonie von unterwegs zusätzlich einen TURN-Key im
+<a href="https://dash.cloudflare.com/?to=/:account/calls" target="_blank" rel="noopener">
+Cloudflare Dashboard (Realtime/Calls → TURN)</a> anlegen und Token-ID/API-Token als
+<code>cf_turn_key_id</code>/<code>cf_turn_api_token</code> eintragen - kein Router
+nötig.</li>
 <li>Add-on speichern und <strong>neu starten</strong>.</li>
 </ol>
 </div>
@@ -493,7 +466,8 @@ async def api_ringing(request):
 
 
 async def api_ice_servers(request):
-    return web.json_response(_ice_servers_for_browser())
+    servers = await fetch_cf_ice_servers(request.app["http"])
+    return web.json_response(servers)
 
 
 async def webrtc_offer(request):
@@ -514,9 +488,8 @@ async def webrtc_offer(request):
         return web.json_response({"error": str(e)}, status=409)
 
     payload_type = SIP_CLIENT.active_call["payload_type"]
-    ice_servers = webrtc_bridge.build_ice_servers(
-        TURN_PUBLIC_HOST or SIP_CLIENT.local_ip, TURN_PORT, TURN_USERNAME, TURN_PASSWORD,
-    )
+    cf_servers = await fetch_cf_ice_servers(request.app["http"])
+    ice_servers = webrtc_bridge.ice_servers_from_cloudflare(cf_servers)
     call = webrtc_bridge.CallSession(rtp, payload_type, ice_servers)
     try:
         answer_sdp, answer_type = await call.accept_offer(data["sdp"], data["type"])
@@ -556,20 +529,18 @@ def build_dashboard_app(http_session):
 
 
 async def main():
-    global SIP_CLIENT, _SHUTTING_DOWN
+    global SIP_CLIENT
 
     if not (TALK_SIP_HOST and SIP_EXTENSION and SIP_PASSWORD):
         log.error(
             "talk_sip_host, sip_extension und sip_password muessen konfiguriert sein - "
             "siehe Dokumentations-Tab (DOCS.md) fuer die Einrichtung.",
         )
-
-    coturn_proc = None
-    if ENABLE_CALLING:
-        try:
-            coturn_proc = await _start_coturn()
-        except (OSError, FileNotFoundError) as e:
-            log.error("coturn konnte nicht gestartet werden - Telefonie bleibt ohne Audio: %s", e)
+    if ENABLE_CALLING and not (CF_TURN_KEY_ID and CF_TURN_API_TOKEN):
+        log.warning(
+            "cf_turn_key_id/cf_turn_api_token nicht konfiguriert - Annehmen/Telefonieren "
+            "funktioniert dadurch nur im selben LAN wie dieser Add-on-Host.",
+        )
 
     timeout = aiohttp.ClientTimeout(total=10)
     async with aiohttp.ClientSession(timeout=timeout) as http_session:
@@ -602,12 +573,9 @@ async def main():
         try:
             await asyncio.Event().wait()
         finally:
-            _SHUTTING_DOWN = True
             await _close_active_call_session()
             await SIP_CLIENT.stop()
             await dashboard_runner.cleanup()
-            if coturn_proc:
-                coturn_proc.terminate()
 
 
 async def _handle_incoming_call(http_session, caller):

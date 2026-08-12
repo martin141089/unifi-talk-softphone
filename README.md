@@ -19,7 +19,8 @@ flowchart LR
     A -->|"klingelt normal weiter"| C["Eure bestehenden<br/>Telefone/Apps"]
     B -->|"Anrufer-Nummer + Zeit"| D["Call-Log<br/>(/data)"]
     D --> E["Ingress-Dashboard<br/>Anruf-Historie + Annehmen"]
-    E -->|"Annehmen (Browser)"| F["WebRTC-Bridge<br/>(aiortc + coturn)"]
+    E -->|"Annehmen (Browser)"| F["WebRTC-Bridge<br/>(aiortc)"]
+    F <-.->|"TURN-Relay"| H["Cloudflare Realtime<br/>(gehosteter TURN-Dienst)"]
     F <-->|"RTP-Audio (G.711)"| B
     B -.->|"Event + Notification"| G["Home Assistant<br/>eigene Automatisierungen"]
 ```
@@ -35,7 +36,8 @@ niemand, greift nach kurzer Zeit das konfigurierte Standardverhalten (loggen ode
 * SIP-Registrierung (Digest-Auth) als zusätzliche Extension bei UniFi Talk
 * Erkennung eingehender Anrufe inkl. Anrufer-Nummer und Anzeigename
 * **Anruf im Dashboard annehmen und per Mikrofon/Lautsprecher des Browsers führen**
-  (WebRTC-Brücke, eigener `coturn`-TURN-Server für Zugriff auch von unterwegs)
+  (WebRTC-Brücke; für Zugriff auch von unterwegs nutzt sie Cloudflares gehosteten
+  TURN-Dienst — kein eigener Server, keine Portfreigabe am Router nötig)
 * Ingress-Dashboard in der Home-Assistant-Seitenleiste: Registrierungsstatus,
   Live-Anruf-Banner mit Annehmen/Ablehnen/Auflegen, Anruf-Historie, eingebettete
   Setup-Anleitung
@@ -45,15 +47,15 @@ niemand, greift nach kurzer Zeit das konfigurierte Standardverhalten (loggen ode
 * Konfigurierbares Standard-Anruf-Verhalten (`call_handling`), falls niemand annimmt:
   nur loggen oder aktiv ablehnen
 * Keine sensiblen Daten im Code — alle Zugangsdaten werden lokal in Home Assistant
-  eingegeben; TURN-Zugangsdaten werden automatisch generiert
+  eingegeben
 
 ## Was dieses Add-on (noch) nicht kann
 
 Es kann eingehende Anrufe annehmen, aber **nicht selbst wählen** (kein aktives
 Anrufen einer Nummer) und immer nur **einen Anruf gleichzeitig**. Telefonie von
-unterwegs (außerhalb des LAN) braucht zusätzlich eine öffentliche Adresse und eine
-Portfreigabe am Router (`turn_public_host`, siehe DOCS.md) — ohne das funktioniert das
-Annehmen nur im selben WLAN/LAN wie der Add-on-Host.
+unterwegs (außerhalb des LAN) braucht zusätzlich einen kostenlosen/günstigen
+Cloudflare-TURN-Key (`cf_turn_key_id`/`cf_turn_api_token`, siehe DOCS.md) — ohne das
+funktioniert das Annehmen nur im selben WLAN/LAN wie der Add-on-Host.
 
 ***
 
@@ -103,11 +105,8 @@ options:
   register_expiry: 300
 
   enable_calling: true
-  turn_username: "softphone"
-  turn_password: ""
-  turn_public_host: ""
-  turn_relay_port_start: 49160
-  turn_relay_port_end: 49200
+  cf_turn_key_id: ""
+  cf_turn_api_token: ""
 ```
 
 | Option              | Beschreibung                                                                 |
@@ -122,10 +121,8 @@ options:
 | `notify_on_call`     | Home-Assistant-Benachrichtigung bei eingehendem Anruf (Standard `true`)      |
 | `register_expiry`    | SIP-Registrierungs-Intervall in Sekunden (Standard `300`)                    |
 | `enable_calling`     | Annehmen mit Audio im Dashboard aktivieren (Standard `true`)                 |
-| `turn_username`      | Benutzername für den eingebauten TURN-Server (Standard `softphone`)          |
-| `turn_password`      | Passwort für den TURN-Server — leer lassen für automatische Generierung      |
-| `turn_public_host`   | Öffentliche IP/DynDNS-Name für Telefonie von unterwegs (leer = nur LAN)      |
-| `turn_relay_port_start/_end` | UDP-Port-Range für TURN-Relay (Standard `49160`–`49200`)             |
+| `cf_turn_key_id`     | Token-ID des Cloudflare-Realtime-TURN-Keys (leer = Annehmen nur im LAN)      |
+| `cf_turn_api_token`  | Zugehöriges API-Token aus dem Cloudflare Dashboard                          |
 
 ### Automatisierung über das Event `unifi_talk_incoming_call`
 

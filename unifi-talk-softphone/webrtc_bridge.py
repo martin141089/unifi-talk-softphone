@@ -98,21 +98,20 @@ class BrowserToRtpBridge:
             log.exception("Fehler beim Weiterleiten von Browser-Audio zur Telefonie-Seite")
 
 
-def build_ice_servers(turn_host, turn_port, turn_username, turn_password):
-    """Baut die ICE-Server-Liste fuer aiortc aus der eigenen coturn-Instanz.
-    Ohne konfigurierten turn_host (kein oeffentlicher Host hinterlegt) wird
-    eine leere Liste zurueckgegeben - WebRTC funktioniert dann nur ueber reine
-    Host-Kandidaten, also nur im selben LAN wie der Add-on-Host."""
-    if not turn_host:
-        return []
-    return [
-        RTCIceServer(urls=f"stun:{turn_host}:{turn_port}"),
-        RTCIceServer(
-            urls=f"turn:{turn_host}:{turn_port}",
-            username=turn_username,
-            credential=turn_password,
-        ),
-    ]
+def ice_servers_from_cloudflare(servers):
+    """Wandelt die von der Cloudflare-Realtime-TURN-API zurueckgegebene Liste
+    ({"urls": [...], "username": ..., "credential": ...}, siehe
+    fetch_cf_ice_servers() in run.py) in aiortc-RTCIceServer-Objekte um. Ohne
+    konfigurierte Cloudflare-Zugangsdaten kommt eine leere Liste an - WebRTC
+    funktioniert dann nur ueber reine Host-Kandidaten, also nur im selben LAN
+    wie der Add-on-Host."""
+    result = []
+    for s in servers or []:
+        urls = s.get("urls")
+        if not urls:
+            continue
+        result.append(RTCIceServer(urls=urls, username=s.get("username"), credential=s.get("credential")))
+    return result
 
 
 class CallSession:

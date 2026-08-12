@@ -2,6 +2,20 @@
 
 Alle nennenswerten Änderungen an diesem Add-on werden hier dokumentiert.
 
+## [0.2.1]
+
+### Geändert
+- **Eigener TURN-Server (coturn) durch Cloudflare Realtime TURN ersetzt.**
+  Telefonie von unterwegs braucht dadurch keine Portfreigabe am Router mehr - nur
+  einen TURN-Key aus dem Cloudflare Dashboard (`cf_turn_key_id`/`cf_turn_api_token`
+  statt der bisherigen `turn_username`/`turn_password`/`turn_public_host`/
+  `turn_relay_port_start`/`turn_relay_port_end`). Ein normaler Cloudflare-Tunnel
+  (wie er für den Home-Assistant-Zugriff selbst genutzt wird) kann TURN technisch
+  nicht tragen (öffentliches UDP wird von Cloudflare Tunnel nicht unterstützt) -
+  Cloudflares eigener, separat gehosteter TURN-Dienst schon.
+- Dockerfile dadurch wieder deutlich schlanker (kein `coturn`-Systempaket mehr
+  nötig).
+
 ## [0.2.0]
 
 ### Hinzugefügt

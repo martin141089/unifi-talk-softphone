@@ -76,31 +76,36 @@ seht ihr danach den Registrierungsstatus sowie eintreffende Anrufe.
 
 Mit `enable_calling: true` (Standard) könnt ihr eingehende Anrufe direkt im
 Dashboard **annehmen und per Mikrofon/Lautsprecher des Browsers führen** –
-technisch über eine WebRTC-Brücke (das Add-on bringt dafür einen eigenen
-`coturn`-TURN-Server mit).
+technisch über eine WebRTC-Brücke.
 
 **Nur im selben WLAN/LAN wie der Add-on-Host:** funktioniert ohne weitere
 Einrichtung – einfach im Dashboard auf **„Annehmen"** klicken, sobald es
 klingelt (Browser fragt nach Mikrofon-Zugriff).
 
-**Auch von unterwegs (z. B. nach einer Push-Benachrichtigung):** zusätzlich
-nötig:
+**Auch von unterwegs (z. B. nach einer Push-Benachrichtigung):** WebRTC
+braucht dafür einen TURN-Relay-Server, der NAT/Firewalls überwindet. Statt
+einen eigenen zu betreiben und Ports am Router freizugeben, nutzt dieses
+Add-on **Cloudflares gehosteten TURN-Dienst** (Teil von „Cloudflare
+Realtime", vormals „Calls") – ganz ohne Portfreigabe, da ihr ohnehin schon
+Cloudflare (z. B. für den Tunnel zu Home Assistant) nutzt:
 
-1. `turn_public_host` in der Add-on-Konfiguration auf eure öffentliche
-   IP-Adresse oder einen DynDNS-Hostnamen setzen (denselben, über den ihr auch
-   sonst von außen auf Home Assistant zugreift)
-2. Am Router (UniFi-Gateway → Einstellungen → Internet/Firewall →
-   **Portweiterleitung**) folgende Ports **UDP** auf die IP dieses
-   Add-on-Hosts weiterleiten:
-   - `3478` (TURN-Signalisierung)
-   - `49160-49200` (Relay-Range, Standard – einstellbar über
-     `turn_relay_port_start`/`turn_relay_port_end`)
-3. Add-on neu starten
+1. Im [Cloudflare Dashboard](https://dash.cloudflare.com/?to=/:account/calls)
+   zu **Realtime** (bzw. „Calls") → **TURN** wechseln
+2. Einen neuen **TURN Key** erstellen ("Create TURN Key")
+3. Die beiden angezeigten Werte notieren: **Token ID** (bzw. „Key ID") und
+   **API Token**
+4. In der Add-on-Konfiguration eintragen: `cf_turn_key_id` = Token ID,
+   `cf_turn_api_token` = API Token
+5. Add-on neu starten
 
-Die TURN-Zugangsdaten (`turn_username`/`turn_password`) müssen nicht manuell
-gesetzt werden – ohne eigene Eingabe generiert das Add-on beim Start ein
-zufälliges Passwort und verwendet es automatisch sowohl für den TURN-Server
-als auch für das Dashboard.
+Ohne `cf_turn_key_id`/`cf_turn_api_token` funktioniert das Annehmen weiterhin,
+dann aber nur im selben LAN wie der Add-on-Host.
+
+> 💰 **Kosten:** Cloudflares TURN-Dienst ist kostenlos in Kombination mit
+> Cloudflares Realtime-SFU, sonst mit nutzungsabhängiger Abrechnung
+> (Stand der Cloudflare-Doku: 0,05 $ pro GB TURN-Traffic). Für gelegentliche
+> Sprachanrufe (reines Audio, sehr geringe Bandbreite) fällt das kaum ins
+> Gewicht.
 
 ## Anruf-Verhalten (`call_handling`)
 
@@ -121,9 +126,9 @@ danach:
 - **Immer nur ein Anruf gleichzeitig.** Ein zweiter eingehender Anruf während
   eines bereits laufenden wird wie gewohnt behandelt (klingelt, loggt), lässt
   sich aber erst annehmen, wenn der erste beendet ist.
-- **Telefonie von unterwegs braucht eine öffentliche Adresse + Portfreigabe**
-  (siehe Schritt 5) – ohne `turn_public_host` funktioniert das Annehmen nur im
-  selben LAN wie der Add-on-Host.
+- **Telefonie von unterwegs braucht einen Cloudflare-TURN-Key** (siehe
+  Schritt 5) – ohne `cf_turn_key_id`/`cf_turn_api_token` funktioniert das
+  Annehmen nur im selben LAN wie der Add-on-Host.
 - **Ausgehende externe Anrufe** funktionieren über so registrierte
   Drittanbieter-Geräte laut mehreren Community-Berichten teils nicht
   zuverlässig (Fehler „486 Busy"). Für den reinen Empfang/Annehmen über dieses
