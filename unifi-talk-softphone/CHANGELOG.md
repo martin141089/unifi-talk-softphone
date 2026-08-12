@@ -2,6 +2,16 @@
 
 Alle nennenswerten Änderungen an diesem Add-on werden hier dokumentiert.
 
+## [0.1.1]
+
+### Behoben
+- **Erfolgreiche SIP-Registrierung wurde nirgends geloggt.** Nur Fehlschläge landeten
+  im Log, ein Erfolg blieb stumm - im Live-Test gegen eine echte UniFi-Talk-Console
+  sah das nach einer hängenden Registrierung aus, obwohl sie sofort geklappt hatte.
+  Jetzt loggt eine (erst-)erfolgreiche Registrierung explizit.
+- Dashboard unterscheidet jetzt "nicht konfiguriert" von "Registrierung fehlgeschlagen"
+  statt beides als "wird versucht ..." anzuzeigen.
+
 ## [0.1.0]
 
 ### Hinzugefügt

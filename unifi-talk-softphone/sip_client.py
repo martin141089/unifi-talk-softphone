@@ -255,10 +255,13 @@ class SipClient:
                 self.last_error = str(e)
 
             if ok:
+                was_registered = self.registered
                 self.registered = True
                 self.last_error = None
                 if self.on_registered:
                     self.on_registered(True, None)
+                if not was_registered:
+                    log.info("SIP-Registrierung erfolgreich (Extension %s)", self.extension)
                 backoff = 5
                 await asyncio.sleep(max(30, self.expiry - 30))
             else:
