@@ -400,6 +400,21 @@ async function createLocalOffer() {
 // globale pc-Variable der ersten ueberschreiben ("pc.close() auf null").
 let callBusy = false;
 
+// Klingelt das Ziel laenger (mobile Netze/Menschen antworten nicht sofort),
+// kann iOS Safari die WebRTC-Verbindung eines im Hintergrund/gesperrten Tabs
+// stillschweigend invalidieren - setRemoteDescription() schlaegt dann mit
+// InvalidStateError fehl, obwohl der Anruf auf SIP-Ebene angenommen wurde.
+// Das ist eine bekannte iOS-Safari-Einschraenkung (siehe DOCS.md), keine
+// eigene Fehlfunktion - hier nur in eine verstaendliche Meldung uebersetzt.
+function describeCallError(e) {
+  if (e && e.name === "InvalidStateError") {
+    return "Verbindung abgebrochen, waehrend das Ziel klingelte - vermutlich hat iOS Safari " +
+      "die Verbindung im Hintergrund/bei gesperrtem Bildschirm beendet. Bildschirm waehrend " +
+      "des Klingelns eingeschaltet und die Seite im Vordergrund lassen, dann erneut versuchen.";
+  }
+  return String(e);
+}
+
 async function answerCall() {
   if (callBusy) return;
   if (!checkMicSupport()) { showIdle(); return; }
@@ -426,7 +441,7 @@ async function answerCall() {
     await myPc.setRemoteDescription(answer);
     showActive();
   } catch (e) {
-    alert("Annehmen fehlgeschlagen: " + e);
+    alert("Annehmen fehlgeschlagen: " + describeCallError(e));
     if (myPc) myPc.close();
     if (pc === myPc) pc = null;
     showIdle();
@@ -481,7 +496,7 @@ async function dialCall() {
     await myPc.setRemoteDescription(answer);
     document.getElementById("active-text").textContent = "Verbunden mit " + number;
   } catch (e) {
-    alert("Anrufen fehlgeschlagen: " + e);
+    alert("Anrufen fehlgeschlagen: " + describeCallError(e));
     if (myPc) myPc.close();
     if (pc === myPc) pc = null;
     showIdle();

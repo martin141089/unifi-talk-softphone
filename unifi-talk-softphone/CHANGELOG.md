@@ -2,6 +2,23 @@
 
 Alle nennenswerten Änderungen an diesem Add-on werden hier dokumentiert.
 
+## [0.3.7]
+
+### Behoben
+- **Bestätigt: Der SIP-Teil des Wählens funktioniert jetzt zuverlässig** (der
+  0.3.6-Fix hat sich im Live-Test bewährt - ein einzelner Klick, `INVITE`
+  wurde nach genau einer Challenge-Runde durchgestellt, `200 OK` kam nach
+  ca. 36 Sekunden echtem Klingeln). Danach schlug das Verbinden von Audio
+  aber mit `InvalidStateError: The object is in an invalid state.` fehl -
+  Ursache ist eine bekannte iOS-Safari-Einschränkung: WebRTC-Verbindungen in
+  einem länger im Hintergrund/bei gesperrtem Bildschirm liegenden Tab können
+  von iOS selbst beendet werden, während `call/dial` noch auf die Antwort
+  wartet (bis zu ~40s pro Auth-Runde). Statt der kryptischen Browser-
+  Fehlermeldung erscheint jetzt eine verständliche Erklärung mit Hinweis,
+  während des Klingelns Bildschirm/Seite im Vordergrund zu lassen - eine
+  echte Behebung ist von einer Webseite aus nicht möglich (kein natives
+  CallKit-Wecken), siehe DOCS.md.
+
 ## [0.3.6]
 
 ### Behoben

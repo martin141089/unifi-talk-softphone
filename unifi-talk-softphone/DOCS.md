@@ -130,6 +130,13 @@ danach:
   eingehender Anruf während eines bereits laufenden wird wie gewohnt
   behandelt (klingelt, loggt), lässt sich aber erst annehmen, wenn der erste
   beendet ist.
+- **Klingelt das Ziel beim Wählen länger, kann iOS Safari die Verbindung im
+  Hintergrund/bei gesperrtem Bildschirm stillschweigend beenden** – der
+  Anruf wird dann zwar auf SIP-Ebene angenommen, aber das Verbinden des
+  Audios schlägt mit einer Fehlermeldung fehl. Bekannte iOS-Safari-
+  Einschränkung bei WebRTC in Hintergrund-Tabs, kein Bug dieses Add-ons.
+  Bildschirm/Seite während des Klingelns im Vordergrund lassen, dann klappt
+  es normalerweise.
 - **Telefonie von unterwegs braucht einen Cloudflare-TURN-Key** (siehe
   Schritt 5) – ohne `cf_turn_key_id`/`cf_turn_api_token` funktioniert
   Annehmen/Wählen nur im selben LAN wie der Add-on-Host.
