@@ -1,12 +1,12 @@
 # UniFi Talk Softphone
 
-**Anrufe annehmen & wählen, Anrufer-Übersicht & SIP-Client für UniFi Talk in Home Assistant**
+**Anrufer-Übersicht & SIP-Client für UniFi Talk in Home Assistant**
 
 UniFi Talk bietet in Deutschland offiziell keinen Softphone-Modus (Telefonieren über
 PC/Handy-App) und keine API/Webhooks für Anruf-Ereignisse. Dieses Home-Assistant-Add-on
-registriert sich per SIP als zusätzliche Extension bei UniFi Talk und lässt sich direkt
-im Home-Assistant-Dashboard als echtes Softphone nutzen — eingehende Anrufe annehmen und
-selbst wählen, mit echtem Audio über eine WebRTC-Brücke im Browser.
+registriert sich per SIP als zusätzliche, passive Extension bei UniFi Talk und macht so
+eingehende Anrufe (Anrufer-Nummer, Name, Zeitpunkt) im Home-Assistant-Dashboard und für
+eigene Automatisierungen sichtbar.
 
 ***
 
@@ -15,19 +15,16 @@ selbst wählen, mit echtem Audio über eine WebRTC-Brücke im Browser.
 ```mermaid
 flowchart LR
     A["UniFi Talk<br/>eingehender Anruf"] -->|"SIP INVITE"| B["Add-on<br/>SIP-Client (Extension)"]
-    B -->|"180 Ringing"| A
     A -->|"klingelt normal weiter"| C["Eure bestehenden<br/>Telefone/Apps"]
     B -->|"Anrufer-Nummer + Zeit"| D["Call-Log<br/>(/data)"]
-    D --> E["Ingress-Dashboard<br/>Anruf-Historie + Annehmen"]
-    E -->|"Annehmen (Browser)"| F["WebRTC-Bridge<br/>(aiortc)"]
-    F <-.->|"TURN-Relay"| H["Cloudflare Realtime<br/>(gehosteter TURN-Dienst)"]
-    F <-->|"RTP-Audio (G.711)"| B
+    D --> E["Ingress-Dashboard<br/>Anruf-Historie"]
     B -.->|"Event + Notification"| G["Home Assistant<br/>eigene Automatisierungen"]
 ```
 
-Das Add-on nimmt Anrufe nicht automatisch an — es klingelt zusätzlich zu euren
-bestehenden Geräten/der App mit und lässt sich bei Bedarf im Dashboard übernehmen; reagiert
-niemand, greift nach kurzer Zeit das konfigurierte Standardverhalten (loggen oder ablehnen).
+Das Add-on nimmt Anrufe nicht an und führt kein Audio — es registriert sich nur
+zusätzlich zu euren bestehenden Geräten/der App und beobachtet die SIP-Signalisierung,
+um eingehende Anrufe zu erkennen und zu loggen; eure echten Telefone/Apps klingeln
+unverändert normal weiter.
 
 ***
 
@@ -35,27 +32,23 @@ niemand, greift nach kurzer Zeit das konfigurierte Standardverhalten (loggen ode
 
 * SIP-Registrierung (Digest-Auth) als zusätzliche Extension bei UniFi Talk
 * Erkennung eingehender Anrufe inkl. Anrufer-Nummer und Anzeigename
-* **Anrufe im Dashboard annehmen UND selbst wählen** — per Mikrofon/Lautsprecher
-  des Browsers (WebRTC-Brücke; für Zugriff auch von unterwegs nutzt sie
-  Cloudflares gehosteten TURN-Dienst — kein eigener Server, keine Portfreigabe
-  am Router nötig)
 * Ingress-Dashboard in der Home-Assistant-Seitenleiste: Registrierungsstatus,
-  Live-Anruf-Banner mit Annehmen/Ablehnen/Auflegen, Wählfeld, Anruf-Historie,
-  eingebettete Setup-Anleitung
+  Anruf-Historie, eingebettete Setup-Anleitung
 * Home-Assistant-Benachrichtigung bei eingehendem Anruf (`notify_on_call`) — als
   `persistent_notification` sowie als Event `unifi_talk_incoming_call` für eigene
   Automatisierungen (z. B. Ansage auf einem Lautsprecher oder Push aufs Handy)
-* Konfigurierbares Standard-Anruf-Verhalten (`call_handling`), falls niemand annimmt:
-  nur loggen oder aktiv ablehnen
+* Konfigurierbares Anruf-Verhalten (`call_handling`): nur loggen oder aktiv ablehnen
 * Keine sensiblen Daten im Code — alle Zugangsdaten werden lokal in Home Assistant
   eingegeben
 
-## Was dieses Add-on (noch) nicht kann
+## Was dieses Add-on nicht kann
 
-Immer nur **ein Anruf gleichzeitig** (angenommen oder gewählt). Telefonie von
-unterwegs (außerhalb des LAN) braucht zusätzlich einen kostenlosen/günstigen
-Cloudflare-TURN-Key (`cf_turn_key_id`/`cf_turn_api_token`, siehe DOCS.md) — ohne das
-funktioniert Annehmen/Wählen nur im selben WLAN/LAN wie der Add-on-Host.
+**Kein Annehmen, kein Wählen, kein Audio.** Ein früherer Versuch, Anrufe per
+WebRTC-Brücke im Dashboard anzunehmen und selbst zu wählen, wurde wieder entfernt:
+Ausgehende Anrufe zu externen Nummern lassen sich über diesen SIP-Extension-
+Workaround architektonisch nicht erreichen (UniFi Talk routet externe Ziele nur
+über eine interne Anwendungslogik, nicht über SIP-INVITE) — das Add-on beschränkt
+sich deshalb bewusst auf reine Anruferkennung und -Protokollierung.
 
 ***
 
@@ -103,10 +96,6 @@ options:
   call_handling: "log_only"
   notify_on_call: true
   register_expiry: 300
-
-  enable_calling: true
-  cf_turn_key_id: ""
-  cf_turn_api_token: ""
 ```
 
 | Option              | Beschreibung                                                                 |
@@ -117,12 +106,9 @@ options:
 | `sip_password`       | Zugehöriges SIP-Passwort (per SSH ausgelesen, siehe DOCS.md)                 |
 | `sip_domain`         | SIP-Domain/Realm (Standard `talk.com`)                                        |
 | `local_sip_port`     | Lokaler UDP-Port des Add-ons für SIP-Signaling                               |
-| `call_handling`      | Standardverhalten, falls niemand annimmt: `log_only` (nur loggen) oder `decline` (ablehnen) |
+| `call_handling`      | Anruf-Verhalten: `log_only` (nur loggen, andere Geräte klingeln normal weiter) oder `decline` (sofort mit 486 Busy ablehnen) |
 | `notify_on_call`     | Home-Assistant-Benachrichtigung bei eingehendem Anruf (Standard `true`)      |
 | `register_expiry`    | SIP-Registrierungs-Intervall in Sekunden (Standard `300`)                    |
-| `enable_calling`     | Annehmen mit Audio im Dashboard aktivieren (Standard `true`)                 |
-| `cf_turn_key_id`     | Token-ID des Cloudflare-Realtime-TURN-Keys (leer = Annehmen nur im LAN)      |
-| `cf_turn_api_token`  | Zugehöriges API-Token aus dem Cloudflare Dashboard                          |
 
 ### Automatisierung über das Event `unifi_talk_incoming_call`
 

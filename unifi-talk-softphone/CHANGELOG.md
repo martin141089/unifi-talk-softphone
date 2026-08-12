@@ -2,6 +2,35 @@
 
 Alle nennenswerten Änderungen an diesem Add-on werden hier dokumentiert.
 
+## [0.4.0]
+
+### Entfernt
+- **Telefonie-Feature (Annehmen, Wählen, WebRTC-Bridge) komplett zurückgebaut.**
+  Ausgehende Anrufe zu externen (PSTN-)Nummern erwiesen sich nach ausführlicher
+  Live-Diagnose (sieben verschiedene Nummernformate/Ziel-Domains getestet) als
+  architektonisch über diesen SIP-Extension-Workaround nicht erreichbar: ein
+  Support-File-Auszug bestätigte, dass UniFi Talk externe Ziele ausschließlich
+  über eine interne Anwendungslogik (`sofia/gateway/…`, per ESL/`originate`
+  server-seitig ausgelöst) routet, nicht über ein regulär per SIP-INVITE
+  erreichbares Dialplan-Ziel - ein Drittanbieter-Gerät kann dort grundsätzlich
+  nicht andocken. Damit war die Voraussetzung für das ursprünglich geplante
+  vollwertige Softphone (siehe 0.2.0-0.3.9) entfallen. Statt eines nur zur
+  Hälfte funktionierenden Features (Annehmen ging, Wählen nicht) baut dieses
+  Release konsequent auf reine Anruferkennung + Logging zurück (Funktionsumfang
+  wie 0.1.x):
+  - `webrtc_bridge.py` (aiortc/PyAV-Bridge) entfernt, `aiortc`-Abhängigkeit aus
+    dem Dockerfile entfernt (nur noch `aiohttp` nötig)
+  - `sip_client.py`: RTP-Session, SDP-Handling, `answer_ringing_call()`,
+    `dial()`, `hangup_active_call()` entfernt - INVITE wird je nach
+    `call_handling` sofort entweder ignoriert (`log_only`, andere
+    Klingelgruppen-Mitglieder klingeln normal weiter) oder mit 486 Busy
+    abgelehnt (`decline`), kein 25s-Klingelfenster mehr
+  - `run.py`/Dashboard: WebRTC-Endpunkte (`/webrtc/offer`, `/call/dial`,
+    `/call/decline`, `/call/hangup`, `/api/ice-servers`, `/api/ringing`),
+    Annehmen/Ablehnen/Auflegen/Wählen-UI und Cloudflare-Realtime-TURN-Integration
+    entfernt
+  - Optionen `enable_calling`, `cf_turn_key_id`, `cf_turn_api_token` entfernt
+
 ## [0.3.9]
 
 ### Geändert

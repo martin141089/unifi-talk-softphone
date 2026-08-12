@@ -72,79 +72,28 @@ Die Ausgabe ist das SIP-Passwort für diese Extension – notieren.
 Add-on **speichern und starten** – im Dashboard (Home-Assistant-Seitenleiste)
 seht ihr danach den Registrierungsstatus sowie eintreffende Anrufe.
 
-## Schritt 5: Telefonie (Annehmen mit Audio) – optional
-
-Mit `enable_calling: true` (Standard) könnt ihr eingehende Anrufe direkt im
-Dashboard **annehmen und per Mikrofon/Lautsprecher des Browsers führen** –
-technisch über eine WebRTC-Brücke.
-
-**Nur im selben WLAN/LAN wie der Add-on-Host:** funktioniert ohne weitere
-Einrichtung – einfach im Dashboard auf **„Annehmen"** klicken, sobald es
-klingelt (Browser fragt nach Mikrofon-Zugriff).
-
-**Auch von unterwegs (z. B. nach einer Push-Benachrichtigung):** WebRTC
-braucht dafür einen TURN-Relay-Server, der NAT/Firewalls überwindet. Statt
-einen eigenen zu betreiben und Ports am Router freizugeben, nutzt dieses
-Add-on **Cloudflares gehosteten TURN-Dienst** (Teil von „Cloudflare
-Realtime", vormals „Calls") – ganz ohne Portfreigabe, da ihr ohnehin schon
-Cloudflare (z. B. für den Tunnel zu Home Assistant) nutzt:
-
-1. Im [Cloudflare Dashboard](https://dash.cloudflare.com/?to=/:account/calls)
-   zu **Realtime** (bzw. „Calls") → **TURN** wechseln
-2. Einen neuen **TURN Key** erstellen ("Create TURN Key")
-3. Die beiden angezeigten Werte notieren: **Token ID** (bzw. „Key ID") und
-   **API Token**
-4. In der Add-on-Konfiguration eintragen: `cf_turn_key_id` = Token ID,
-   `cf_turn_api_token` = API Token
-5. Add-on neu starten
-
-Ohne `cf_turn_key_id`/`cf_turn_api_token` funktioniert das Annehmen weiterhin,
-dann aber nur im selben LAN wie der Add-on-Host.
-
-> 💰 **Kosten:** Cloudflares TURN-Dienst ist kostenlos in Kombination mit
-> Cloudflares Realtime-SFU, sonst mit nutzungsabhängiger Abrechnung
-> (Stand der Cloudflare-Doku: 0,05 $ pro GB TURN-Traffic). Für gelegentliche
-> Sprachanrufe (reines Audio, sehr geringe Bandbreite) fällt das kaum ins
-> Gewicht.
-
 ## Anruf-Verhalten (`call_handling`)
 
-Ein eingehender Anruf klingelt zunächst rund 25 Sekunden lang, in denen ihr
-ihn im Dashboard annehmen könnt (siehe Schritt 5). Reagiert niemand, greift
-danach:
+Ein eingehender Anruf wird sofort erkannt und geloggt (Anrufer-Nummer, Name
+falls übermittelt, Zeitpunkt) – dieses Add-on nimmt keine Anrufe an und führt
+kein Audio, es beobachtet nur die SIP-Signalisierung:
 
-- **`log_only`** (Standard): keine aktive Antwort außer „Ringing" – eure
+- **`log_only`** (Standard): keine aktive Antwort auf das INVITE – eure
   echten Telefone/Apps klingeln normal weiter und können den Anruf annehmen.
-- **`decline`**: Anruf wird nach Ablauf der 25 Sekunden aktiv abgelehnt (486
+- **`decline`**: Anruf wird sofort nach dem Loggen aktiv abgelehnt (486
   Busy). Sinnvoll, falls eure Ring-Group sonst auf alle Mitglieder wartet und
   sich dadurch verzögert.
 
 ## Bekannte Grenzen
 
-- **„Annehmen"/„Anrufen" funktioniert nicht in der eingebetteten Ansicht der
-  Home-Assistant-App.** Die App-WebView blockt auf iOS/Android den
-  Mikrofon-Zugriff (`navigator.mediaDevices` fehlt) – das Dashboard dafür
-  stattdessen direkt in Safari/Chrome öffnen (in Home Assistant einloggen,
-  dann in der Seitenleiste auf „UniFi Talk" klicken).
-- **Immer nur ein Anruf gleichzeitig** (angenommen oder gewählt). Ein zweiter
-  eingehender Anruf während eines bereits laufenden wird wie gewohnt
-  behandelt (klingelt, loggt), lässt sich aber erst annehmen, wenn der erste
-  beendet ist.
-- **Klingelt das Ziel beim Wählen länger, kann iOS Safari die Verbindung im
-  Hintergrund/bei gesperrtem Bildschirm stillschweigend beenden** – der
-  Anruf wird dann zwar auf SIP-Ebene angenommen, aber das Verbinden des
-  Audios schlägt mit einer Fehlermeldung fehl. Bekannte iOS-Safari-
-  Einschränkung bei WebRTC in Hintergrund-Tabs, kein Bug dieses Add-ons.
-  Bildschirm/Seite während des Klingelns im Vordergrund lassen, dann klappt
-  es normalerweise.
-- **Telefonie von unterwegs braucht einen Cloudflare-TURN-Key** (siehe
-  Schritt 5) – ohne `cf_turn_key_id`/`cf_turn_api_token` funktioniert
-  Annehmen/Wählen nur im selben LAN wie der Add-on-Host.
-- **Ausgehende Anrufe können laut mehreren Community-Berichten über so
-  registrierte Drittanbieter-Geräte teils mit „486 Busy" fehlschlagen** -
-  ein bekanntes Risiko dieses Workarounds, nicht etwas, das dieses Add-on
-  softwareseitig umgehen kann. Tritt es auf, hilft meist nur ein Blick in
-  die UniFi-Talk-Konfiguration der Extension (z. B. Klingelgruppen-
-  Zuordnung) oder Geduld bei einem Firmware-Update.
+- **Reine Anruferkennung, kein Audio.** Das Add-on führt/beantwortet keine
+  Gespräche – weder eingehend noch ausgehend. Ein früherer Versuch, über
+  eine WebRTC-Brücke im Dashboard Anrufe anzunehmen und selbst zu wählen,
+  wurde wieder entfernt: Ausgehende Anrufe zu externen (PSTN-)Nummern lassen
+  sich über diesen SIP-Extension-Workaround architektonisch nicht erreichen
+  (UniFi Talk routet externe Ziele ausschließlich über eine interne
+  Anwendungslogik, nicht über ein regulär per SIP-INVITE erreichbares
+  Dialplan-Ziel), und mit dieser Grenze war der Aufwand einer eigenen
+  Audio-Bridge nicht mehr gerechtfertigt.
 - Der Workaround ist **inoffiziell** und kann jederzeit von Ubiquiti geändert
   oder entfernt werden.
