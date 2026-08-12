@@ -162,9 +162,13 @@ code { background: #eef0f2; padding: 1px 5px; border-radius: 4px; }
 
 
 def render_dashboard(status, calls):
+    configured = bool(TALK_SIP_HOST and SIP_EXTENSION and SIP_PASSWORD)
     if status["registered"]:
         status_html = '<span class="status-ok">&#9679; Registriert</span> bei UniFi Talk als Extension ' \
                       f'<code>{html.escape(SIP_EXTENSION)}</code>'
+    elif not configured:
+        status_html = '<span class="status-bad">&#9679; Nicht konfiguriert</span> - ' \
+                       'talk_sip_host, sip_extension und sip_password fehlen noch (siehe Setup-Anleitung unten)'
     else:
         reason = html.escape(status.get("last_error") or "wird versucht ...")
         status_html = f'<span class="status-bad">&#9679; Nicht registriert</span> ({reason})'
