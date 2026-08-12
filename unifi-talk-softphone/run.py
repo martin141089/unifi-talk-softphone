@@ -336,6 +336,17 @@ async function poll() {
 
 async function answerCall() {
   try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      alert(
+        "Mikrofon-Zugriff ist hier nicht verfügbar - das passiert typischerweise in der " +
+        "eingebetteten Ansicht der Home-Assistant-App. Bitte diese Seite stattdessen direkt " +
+        "in Safari/Chrome öffnen (in Home Assistant einloggen, dann in der Seitenleiste auf " +
+        "„UniFi Talk\" klicken).",
+      );
+      showIdle();
+      return;
+    }
+
     const iceResp = await fetch("api/ice-servers");
     const iceServers = await iceResp.json();
     pc = new RTCPeerConnection({ iceServers });

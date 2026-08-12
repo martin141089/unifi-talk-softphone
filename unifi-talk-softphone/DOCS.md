@@ -121,6 +121,11 @@ danach:
 
 ## Bekannte Grenzen
 
+- **„Annehmen" funktioniert nicht in der eingebetteten Ansicht der
+  Home-Assistant-App.** Die App-WebView blockt auf iOS/Android den
+  Mikrofon-Zugriff (`navigator.mediaDevices` fehlt) – das Dashboard dafür
+  stattdessen direkt in Safari/Chrome öffnen (in Home Assistant einloggen,
+  dann in der Seitenleiste auf „UniFi Talk" klicken).
 - **Nur eingehende Anrufe annehmen, kein aktives Wählen.** Das Add-on kann
   (noch) nicht selbst Nummern anrufen – nur klingelnde Anrufe entgegennehmen.
 - **Immer nur ein Anruf gleichzeitig.** Ein zweiter eingehender Anruf während

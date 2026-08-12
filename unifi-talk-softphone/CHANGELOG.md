@@ -2,6 +2,15 @@
 
 Alle nennenswerten Änderungen an diesem Add-on werden hier dokumentiert.
 
+## [0.2.2]
+
+### Behoben
+- **„Annehmen" schlug in der Home-Assistant-App mit einer kryptischen
+  TypeError fehl.** Die App-WebView stellt auf iOS/Android kein
+  `navigator.mediaDevices` bereit (kein Mikrofon-Zugriff möglich). Zeigt jetzt
+  eine verständliche Fehlermeldung mit Hinweis, das Dashboard stattdessen
+  direkt in Safari/Chrome zu öffnen - dort funktioniert es normal.
+
 ## [0.2.1]
 
 ### Geändert
