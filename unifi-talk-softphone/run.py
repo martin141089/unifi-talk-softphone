@@ -345,7 +345,7 @@ function checkMicSupport() {
       "Mikrofon-Zugriff ist hier nicht verfügbar - das passiert typischerweise in der " +
       "eingebetteten Ansicht der Home-Assistant-App. Bitte diese Seite stattdessen direkt " +
       "in Safari/Chrome öffnen (in Home Assistant einloggen, dann in der Seitenleiste auf " +
-      "„UniFi Talk\" klicken).",
+      "„UniFi Talk” klicken).",
     );
     return false;
   }

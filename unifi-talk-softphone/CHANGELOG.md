@@ -2,6 +2,20 @@
 
 Alle nennenswerten Änderungen an diesem Add-on werden hier dokumentiert.
 
+## [0.3.2]
+
+### Behoben
+- **Echter JavaScript-Syntaxfehler hat das komplette Dashboard-Skript
+  unbrauchbar gemacht - dadurch reagierte KEIN Button mehr, nicht nur
+  "Anrufen".** In der Mikrofon-Fehlermeldung (`checkMicSupport()`, seit
+  0.2.2) stand ein falsch escaptes Anführungszeichen
+  (`\"UniFi Talk\"` - das `\"` wurde von Python selbst als literales `"`
+  ausgewertet statt als escaptes Zeichen fürs JavaScript weitergereicht),
+  wodurch der JS-String vorzeitig endete und der Parser beim Laden der Seite
+  abbrach. Mit `node --check` gegen die tatsächlich ausgelieferte Seite
+  bestätigt und behoben (curly-quote-Zeichen `„…”` statt escaptem `"`
+  verwendet - vermeidet die Escaping-Falle komplett).
+
 ## [0.3.1]
 
 ### Behoben
