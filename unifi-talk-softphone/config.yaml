@@ -1,5 +1,5 @@
 name: "UniFi Talk Softphone"
-version: "0.1.1"
+version: "0.2.0"
 slug: "unifi_talk_softphone"
 description: "SIP-Client & Anrufer-Übersicht für UniFi Talk (Softphone-Workaround für Deutschland) von Martin Henschke"
 url: "https://github.com/martin141089/unifi-talk-softphone"
@@ -35,6 +35,13 @@ options:
   notify_on_call: true
   register_expiry: 300
 
+  enable_calling: true
+  turn_username: "softphone"
+  turn_password: ""
+  turn_public_host: ""
+  turn_relay_port_start: 49160
+  turn_relay_port_end: 49200
+
 schema:
   talk_sip_host: str
   talk_sip_port: port
@@ -45,3 +52,10 @@ schema:
   call_handling: list(log_only|decline)
   notify_on_call: bool
   register_expiry: int
+
+  enable_calling: bool
+  turn_username: str?
+  turn_password: password?
+  turn_public_host: str?
+  turn_relay_port_start: port?
+  turn_relay_port_end: port?

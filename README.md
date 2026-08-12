@@ -1,12 +1,12 @@
 # UniFi Talk Softphone
 
-**Anrufer-Übersicht & SIP-Client für UniFi Talk in Home Assistant**
+**Anrufer-Übersicht, Annehmen mit Audio & SIP-Client für UniFi Talk in Home Assistant**
 
 UniFi Talk bietet in Deutschland offiziell keinen Softphone-Modus (Telefonieren über
 PC/Handy-App) und keine API/Webhooks für Anruf-Ereignisse. Dieses Home-Assistant-Add-on
-registriert sich per SIP als zusätzliche, passive Extension bei UniFi Talk und erkennt
-so eingehende Anrufe (Anrufer-Nummer, Zeitpunkt) — als Anrufer-Übersicht im
-Home-Assistant-Dashboard und als Event/Notification für eigene Automatisierungen.
+registriert sich per SIP als zusätzliche Extension bei UniFi Talk, erkennt eingehende
+Anrufe (Anrufer-Nummer, Zeitpunkt) und lässt sie sich optional direkt im
+Home-Assistant-Dashboard annehmen — mit echtem Audio über eine WebRTC-Brücke im Browser.
 
 ***
 
@@ -15,37 +15,45 @@ Home-Assistant-Dashboard und als Event/Notification für eigene Automatisierunge
 ```mermaid
 flowchart LR
     A["UniFi Talk<br/>eingehender Anruf"] -->|"SIP INVITE"| B["Add-on<br/>SIP-Client (Extension)"]
-    B -->|"180 Ringing, kein 200 OK"| A
+    B -->|"180 Ringing"| A
     A -->|"klingelt normal weiter"| C["Eure bestehenden<br/>Telefone/Apps"]
     B -->|"Anrufer-Nummer + Zeit"| D["Call-Log<br/>(/data)"]
-    D --> E["Ingress-Dashboard<br/>Anruf-Historie"]
-    B -.->|"Event + Notification"| F["Home Assistant<br/>eigene Automatisierungen"]
+    D --> E["Ingress-Dashboard<br/>Anruf-Historie + Annehmen"]
+    E -->|"Annehmen (Browser)"| F["WebRTC-Bridge<br/>(aiortc + coturn)"]
+    F <-->|"RTP-Audio (G.711)"| B
+    B -.->|"Event + Notification"| G["Home Assistant<br/>eigene Automatisierungen"]
 ```
 
-Das Add-on nimmt Anrufe standardmäßig **nicht an** — es registriert sich nur zusätzlich
-zu euren bestehenden Geräten/der App und beobachtet eingehende Anrufe passiv.
+Das Add-on nimmt Anrufe nicht automatisch an — es klingelt zusätzlich zu euren
+bestehenden Geräten/der App mit und lässt sich bei Bedarf im Dashboard übernehmen; reagiert
+niemand, greift nach kurzer Zeit das konfigurierte Standardverhalten (loggen oder ablehnen).
 
 ***
 
 ## Funktionen
 
-* SIP-Registrierung (Digest-Auth) als zusätzliche, passive Extension bei UniFi Talk
+* SIP-Registrierung (Digest-Auth) als zusätzliche Extension bei UniFi Talk
 * Erkennung eingehender Anrufe inkl. Anrufer-Nummer und Anzeigename
+* **Anruf im Dashboard annehmen und per Mikrofon/Lautsprecher des Browsers führen**
+  (WebRTC-Brücke, eigener `coturn`-TURN-Server für Zugriff auch von unterwegs)
 * Ingress-Dashboard in der Home-Assistant-Seitenleiste: Registrierungsstatus,
-  Anruf-Historie, eingebettete Setup-Anleitung
+  Live-Anruf-Banner mit Annehmen/Ablehnen/Auflegen, Anruf-Historie, eingebettete
+  Setup-Anleitung
 * Home-Assistant-Benachrichtigung bei eingehendem Anruf (`notify_on_call`) — als
   `persistent_notification` sowie als Event `unifi_talk_incoming_call` für eigene
   Automatisierungen (z. B. Ansage auf einem Lautsprecher oder Push aufs Handy)
-* Konfigurierbares Anruf-Verhalten (`call_handling`): nur loggen oder aktiv ablehnen
+* Konfigurierbares Standard-Anruf-Verhalten (`call_handling`), falls niemand annimmt:
+  nur loggen oder aktiv ablehnen
 * Keine sensiblen Daten im Code — alle Zugangsdaten werden lokal in Home Assistant
-  eingegeben
+  eingegeben; TURN-Zugangsdaten werden automatisch generiert
 
 ## Was dieses Add-on (noch) nicht kann
 
-Es ist eine reine **Anruf-Erkennung**, kein Softphone mit Audio: Es führt/beantwortet
-keine Gespräche. Echtes Telefonieren am PC/Handy über Home Assistant wäre ein
-möglicher nächster Ausbauschritt (z. B. über eine WebRTC-Bridge), aber (noch) nicht
-Teil dieser ersten Version.
+Es kann eingehende Anrufe annehmen, aber **nicht selbst wählen** (kein aktives
+Anrufen einer Nummer) und immer nur **einen Anruf gleichzeitig**. Telefonie von
+unterwegs (außerhalb des LAN) braucht zusätzlich eine öffentliche Adresse und eine
+Portfreigabe am Router (`turn_public_host`, siehe DOCS.md) — ohne das funktioniert das
+Annehmen nur im selben WLAN/LAN wie der Add-on-Host.
 
 ***
 
@@ -93,6 +101,13 @@ options:
   call_handling: "log_only"
   notify_on_call: true
   register_expiry: 300
+
+  enable_calling: true
+  turn_username: "softphone"
+  turn_password: ""
+  turn_public_host: ""
+  turn_relay_port_start: 49160
+  turn_relay_port_end: 49200
 ```
 
 | Option              | Beschreibung                                                                 |
@@ -103,9 +118,14 @@ options:
 | `sip_password`       | Zugehöriges SIP-Passwort (per SSH ausgelesen, siehe DOCS.md)                 |
 | `sip_domain`         | SIP-Domain/Realm (Standard `talk.com`)                                        |
 | `local_sip_port`     | Lokaler UDP-Port des Add-ons für SIP-Signaling                               |
-| `call_handling`      | `log_only` (nur loggen) oder `decline` (Anruf nach dem Loggen ablehnen)       |
+| `call_handling`      | Standardverhalten, falls niemand annimmt: `log_only` (nur loggen) oder `decline` (ablehnen) |
 | `notify_on_call`     | Home-Assistant-Benachrichtigung bei eingehendem Anruf (Standard `true`)      |
 | `register_expiry`    | SIP-Registrierungs-Intervall in Sekunden (Standard `300`)                    |
+| `enable_calling`     | Annehmen mit Audio im Dashboard aktivieren (Standard `true`)                 |
+| `turn_username`      | Benutzername für den eingebauten TURN-Server (Standard `softphone`)          |
+| `turn_password`      | Passwort für den TURN-Server — leer lassen für automatische Generierung      |
+| `turn_public_host`   | Öffentliche IP/DynDNS-Name für Telefonie von unterwegs (leer = nur LAN)      |
+| `turn_relay_port_start/_end` | UDP-Port-Range für TURN-Relay (Standard `49160`–`49200`)             |
 
 ### Automatisierung über das Event `unifi_talk_incoming_call`
 

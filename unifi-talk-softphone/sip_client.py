@@ -18,8 +18,16 @@ import random
 import re
 import socket
 import string
+import struct
+import time
 
 log = logging.getLogger("unifi_talk_sip")
+
+# G.711-Codecs (RTP-Standard-Payload-Types, RFC 3551) - die einzigen, die dieser
+# Client anbietet/akzeptiert, da sie ohne zusaetzliche Bibliotheken ueber das
+# Python-Stdlib-Modul audioop transkodiert werden koennen.
+PCMU, PCMA = 0, 8
+_CODEC_NAMES = {PCMU: "PCMU", PCMA: "PCMA"}
 
 _CANON_HEADERS = {
     "v": "Via", "via": "Via",
@@ -157,7 +165,10 @@ def _parse_caller(msg: SipMessage):
     return {"name": "", "number": uri_match.group(1) if uri_match else header.strip()}
 
 
-def _build_response(req: SipMessage, status_code, reason, local_ip, local_port, extension, to_tag=None, with_contact=True):
+def _build_response(
+    req: SipMessage, status_code, reason, local_ip, local_port, extension,
+    to_tag=None, with_contact=True, body="", content_type=None,
+):
     lines = [f"SIP/2.0 {status_code} {reason}", f"Via: {req.get('Via')}", f"From: {req.get('From')}"]
     to = req.get("To")
     if to_tag and "tag=" not in to:
@@ -167,10 +178,109 @@ def _build_response(req: SipMessage, status_code, reason, local_ip, local_port, 
     lines.append(f"CSeq: {req.get('CSeq')}")
     if with_contact:
         lines.append(f"Contact: <sip:{extension}@{local_ip}:{local_port}>")
-    lines.append("Content-Length: 0")
+    body_bytes = body.encode("utf-8")
+    if content_type:
+        lines.append(f"Content-Type: {content_type}")
+    lines.append(f"Content-Length: {len(body_bytes)}")
     lines.append("")
-    lines.append("")
+    lines.append(body)
     return "\r\n".join(lines)
+
+
+def _parse_sdp(body: str):
+    """Extrahiert Remote-RTP-IP/Port und angebotene Audio-Codecs (Payload-Types)
+    aus einem SDP-Body (INVITE-Angebot). Gibt None zurueck, wenn kein
+    brauchbarer Audio-Media-Block gefunden wurde."""
+    conn_ip = None
+    audio_port = None
+    payload_types = []
+    for line in body.splitlines():
+        line = line.strip()
+        if line.startswith("c=IN IP4 "):
+            conn_ip = line.split(" ", 2)[2].strip()
+        elif line.startswith("m=audio "):
+            parts = line.split(" ")
+            if len(parts) >= 4:
+                audio_port = int(parts[1])
+                payload_types = [int(p) for p in parts[3:] if p.isdigit()]
+    if conn_ip is None or audio_port is None:
+        return None
+    return {"ip": conn_ip, "port": audio_port, "payload_types": payload_types}
+
+
+def _build_sdp_answer(local_ip, rtp_port, payload_type):
+    codec_name = _CODEC_NAMES[payload_type]
+    session_id = int(time.time())
+    return (
+        f"v=0\r\n"
+        f"o=unifitalksoftphone {session_id} {session_id} IN IP4 {local_ip}\r\n"
+        f"s=unifi-talk-softphone\r\n"
+        f"c=IN IP4 {local_ip}\r\n"
+        f"t=0 0\r\n"
+        f"m=audio {rtp_port} RTP/AVP {payload_type}\r\n"
+        f"a=rtpmap:{payload_type} {codec_name}/8000\r\n"
+        f"a=sendrecv\r\n"
+    )
+
+
+class RtpSession(asyncio.DatagramProtocol):
+    """Ein einzelner RTP-Audio-Strom (G.711) fuer die Telefonie-Seite eines
+    aktiven Anrufs. Empfangene Payload-Bytes landen in recv_queue (fuer die
+    WebRTC-Bridge); send_payload() verschickt Payload-Bytes als RTP-Paket an
+    das ausgehandelte Remote-Ende."""
+
+    def __init__(self, remote_ip, remote_port, payload_type):
+        self.remote_addr = (remote_ip, remote_port)
+        self.payload_type = payload_type
+        self.transport = None
+        self.recv_queue = asyncio.Queue(maxsize=50)
+        self._seq = random.randint(0, 0xFFFF)
+        self._timestamp = random.randint(0, 0xFFFFFFFF)
+        self._ssrc = random.randint(0, 0xFFFFFFFF)
+
+    def connection_made(self, transport):
+        self.transport = transport
+
+    def datagram_received(self, data, addr):
+        if len(data) < 12:
+            return
+        payload = data[12:]
+        if self.recv_queue.full():
+            try:
+                self.recv_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        try:
+            self.recv_queue.put_nowait(payload)
+        except asyncio.QueueFull:
+            pass
+
+    def send_payload(self, payload: bytes, samples=160):
+        """samples = Anzahl PCM-Samples, die dieses Paket repraesentiert
+        (G.711 @ 8kHz: 160 Samples = 20ms, der SIP-Standard-Paketrhythmus)."""
+        if not self.transport:
+            return
+        header = struct.pack(
+            "!BBHII",
+            0x80, self.payload_type & 0x7F,
+            self._seq & 0xFFFF, self._timestamp & 0xFFFFFFFF, self._ssrc,
+        )
+        self.transport.sendto(header + payload, self.remote_addr)
+        self._seq = (self._seq + 1) & 0xFFFF
+        self._timestamp = (self._timestamp + samples) & 0xFFFFFFFF
+
+    def close(self):
+        if self.transport:
+            self.transport.close()
+
+
+async def _create_rtp_session(remote_ip, remote_port, payload_type):
+    loop = asyncio.get_running_loop()
+    protocol = RtpSession(remote_ip, remote_port, payload_type)
+    transport, _ = await loop.create_datagram_endpoint(
+        lambda: protocol, local_addr=("0.0.0.0", 0),
+    )
+    return protocol
 
 
 class _Protocol(asyncio.DatagramProtocol):
@@ -197,7 +307,10 @@ class SipClient:
     """Registriert eine Extension bei UniFi Talk und ruft on_call(caller) fuer
     jeden erkannten eingehenden Anruf auf. caller ist {"number": str, "name": str}."""
 
-    def __init__(self, host, port, local_port, extension, password, domain, expiry, call_handling, on_call, on_registered=None):
+    def __init__(
+        self, host, port, local_port, extension, password, domain, expiry, call_handling,
+        on_call, on_registered=None, on_hangup=None, ring_timeout=25,
+    ):
         self.host = host
         self.port = port
         self.local_port = local_port
@@ -208,11 +321,15 @@ class SipClient:
         self.call_handling = call_handling
         self.on_call = on_call
         self.on_registered = on_registered
+        self.on_hangup = on_hangup
+        self.ring_timeout = ring_timeout
 
         self.local_ip = None
         self.transport = None
         self.registered = False
         self.last_error = None
+        self.ringing_call = None
+        self.active_call = None
 
         self._from_tag = _gen_token(10)
         self._cseq = 1
@@ -363,6 +480,7 @@ class SipClient:
             self._handle_invite(msg)
         elif msg.method in ("BYE", "CANCEL"):
             self._send(_build_response(msg, 200, "OK", self.local_ip, self.local_port, self.extension, with_contact=False))
+            self._handle_remote_hangup(msg)
         elif msg.method == "ACK":
             pass
         else:
@@ -370,10 +488,21 @@ class SipClient:
 
     def _handle_invite(self, msg: SipMessage):
         caller = _parse_caller(msg)
+        call_id = msg.get("Call-ID")
         log.info("Eingehender Anruf erkannt: %s <%s>", caller["name"] or "(unbekannt)", caller["number"])
 
         to_tag = _gen_token(10)
         self._send(_build_response(msg, 180, "Ringing", self.local_ip, self.local_port, self.extension, to_tag=to_tag))
+
+        # Der Anruf klingelt jetzt erstmal nur (kein automatisches Annehmen/Ablehnen) -
+        # das gibt dem Dashboard ein Zeitfenster (ring_timeout), in dem die Nutzerin
+        # ueber "Annehmen" den Anruf per WebRTC uebernehmen kann. Reagiert niemand,
+        # greift nach Ablauf das konfigurierte call_handling (decline/log_only).
+        self.ringing_call = {
+            "call_id": call_id, "to_tag": to_tag, "invite_msg": msg,
+            "caller": caller, "received_at": time.time(),
+        }
+        asyncio.create_task(self._ring_timeout(call_id))
 
         if self.on_call:
             try:
@@ -381,5 +510,113 @@ class SipClient:
             except Exception:
                 log.exception("Fehler im Anruf-Callback")
 
+    async def _ring_timeout(self, call_id):
+        await asyncio.sleep(self.ring_timeout)
+        call = self.ringing_call
+        if not call or call["call_id"] != call_id:
+            return  # laengst angenommen, abgelehnt oder vom Anrufer aufgelegt
         if self.call_handling == "decline":
-            self._send(_build_response(msg, 486, "Busy Here", self.local_ip, self.local_port, self.extension, to_tag=to_tag))
+            self._send(_build_response(
+                call["invite_msg"], 486, "Busy Here", self.local_ip, self.local_port,
+                self.extension, to_tag=call["to_tag"],
+            ))
+        self.ringing_call = None
+
+    def _handle_remote_hangup(self, msg: SipMessage):
+        """BYE/CANCEL vom Anrufer (oder von der UniFi-Console) fuer einen
+        klingelnden oder aktiven Anruf - raeumt lokalen Zustand auf, egal in
+        welcher Phase sich der Anruf gerade befand."""
+        call_id = msg.get("Call-ID")
+        ended = False
+        if self.ringing_call and self.ringing_call["call_id"] == call_id:
+            self.ringing_call = None
+            ended = True
+        if self.active_call and self.active_call["call_id"] == call_id:
+            if self.active_call.get("rtp"):
+                self.active_call["rtp"].close()
+            self.active_call = None
+            ended = True
+        if ended and self.on_hangup:
+            try:
+                self.on_hangup()
+            except Exception:
+                log.exception("Fehler im Auflege-Callback")
+
+    def get_ringing_call(self):
+        call = self.ringing_call
+        if not call:
+            return None
+        return {"call_id": call["call_id"], "caller": call["caller"], "received_at": call["received_at"]}
+
+    def decline_ringing_call(self):
+        call = self.ringing_call
+        if not call:
+            return
+        self._send(_build_response(
+            call["invite_msg"], 486, "Busy Here", self.local_ip, self.local_port,
+            self.extension, to_tag=call["to_tag"],
+        ))
+        self.ringing_call = None
+
+    async def answer_ringing_call(self):
+        """Nimmt den aktuell klingelnden Anruf an: parst das SDP-Angebot aus dem
+        INVITE, baut eine eigene RTP-Session (G.711) auf und beantwortet mit
+        200 OK + eigener SDP-Antwort. Gibt die RtpSession zurueck (Rohdaten-
+        Schnittstelle fuer die WebRTC-Bridge). Wirft RuntimeError, wenn gerade
+        kein Anruf klingelt oder kein passender Codec (PCMU/PCMA) angeboten
+        wurde."""
+        call = self.ringing_call
+        if not call:
+            raise RuntimeError("Kein Anruf klingelt gerade")
+
+        sdp = _parse_sdp(call["invite_msg"].body)
+        if not sdp:
+            raise RuntimeError("SDP im INVITE konnte nicht gelesen werden")
+
+        payload_type = next((pt for pt in (PCMU, PCMA) if pt in sdp["payload_types"]), None)
+        if payload_type is None:
+            raise RuntimeError("Keine unterstuetzte Codec (PCMU/PCMA) angeboten")
+
+        rtp = await _create_rtp_session(sdp["ip"], sdp["port"], payload_type)
+        local_rtp_port = rtp.transport.get_extra_info("sockname")[1]
+
+        answer_body = _build_sdp_answer(self.local_ip, local_rtp_port, payload_type)
+        self._send(_build_response(
+            call["invite_msg"], 200, "OK", self.local_ip, self.local_port, self.extension,
+            to_tag=call["to_tag"], body=answer_body, content_type="application/sdp",
+        ))
+
+        self.active_call = {**call, "rtp": rtp, "payload_type": payload_type}
+        self.ringing_call = None
+        return rtp
+
+    async def hangup_active_call(self):
+        """Legt einen aktiven (angenommenen) Anruf von unserer Seite auf, indem
+        ein BYE verschickt wird. Wird - wie REGISTER auch - immer an die
+        UniFi-Console (self.host/self.port) geschickt, nicht an eine aus dem
+        Contact-Header der Gegenseite geparste Adresse: die Console agiert als
+        B2BUA, jede Signalisierung laeuft ueber sie."""
+        call = self.active_call
+        if not call:
+            return
+
+        cseq = self._next_cseq()
+        branch = "z9hG4bK" + _gen_token(16)
+        our_uri = f"sip:{self.extension}@{self.domain}"
+        lines = [
+            f"BYE sip:{self.domain} SIP/2.0",
+            f"Via: SIP/2.0/UDP {self.local_ip}:{self.local_port};branch={branch};rport",
+            "Max-Forwards: 70",
+            f"From: <{our_uri}>;tag={call['to_tag']}",
+            f"To: {call['invite_msg'].get('From')}",
+            f"Call-ID: {call['call_id']}",
+            f"CSeq: {cseq} BYE",
+            "Content-Length: 0",
+            "",
+            "",
+        ]
+        self._send("\r\n".join(lines))
+
+        if call.get("rtp"):
+            call["rtp"].close()
+        self.active_call = None

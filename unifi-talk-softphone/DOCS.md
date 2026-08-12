@@ -72,24 +72,61 @@ Die Ausgabe ist das SIP-Passwort für diese Extension – notieren.
 Add-on **speichern und starten** – im Dashboard (Home-Assistant-Seitenleiste)
 seht ihr danach den Registrierungsstatus sowie eintreffende Anrufe.
 
+## Schritt 5: Telefonie (Annehmen mit Audio) – optional
+
+Mit `enable_calling: true` (Standard) könnt ihr eingehende Anrufe direkt im
+Dashboard **annehmen und per Mikrofon/Lautsprecher des Browsers führen** –
+technisch über eine WebRTC-Brücke (das Add-on bringt dafür einen eigenen
+`coturn`-TURN-Server mit).
+
+**Nur im selben WLAN/LAN wie der Add-on-Host:** funktioniert ohne weitere
+Einrichtung – einfach im Dashboard auf **„Annehmen"** klicken, sobald es
+klingelt (Browser fragt nach Mikrofon-Zugriff).
+
+**Auch von unterwegs (z. B. nach einer Push-Benachrichtigung):** zusätzlich
+nötig:
+
+1. `turn_public_host` in der Add-on-Konfiguration auf eure öffentliche
+   IP-Adresse oder einen DynDNS-Hostnamen setzen (denselben, über den ihr auch
+   sonst von außen auf Home Assistant zugreift)
+2. Am Router (UniFi-Gateway → Einstellungen → Internet/Firewall →
+   **Portweiterleitung**) folgende Ports **UDP** auf die IP dieses
+   Add-on-Hosts weiterleiten:
+   - `3478` (TURN-Signalisierung)
+   - `49160-49200` (Relay-Range, Standard – einstellbar über
+     `turn_relay_port_start`/`turn_relay_port_end`)
+3. Add-on neu starten
+
+Die TURN-Zugangsdaten (`turn_username`/`turn_password`) müssen nicht manuell
+gesetzt werden – ohne eigene Eingabe generiert das Add-on beim Start ein
+zufälliges Passwort und verwendet es automatisch sowohl für den TURN-Server
+als auch für das Dashboard.
+
 ## Anruf-Verhalten (`call_handling`)
 
-- **`log_only`** (Standard): Anruf wird nur erkannt/geloggt, keine aktive
-  Antwort außer „Ringing" – eure echten Telefone/Apps klingeln normal weiter
-  und können den Anruf annehmen.
-- **`decline`**: Anruf wird nach dem Loggen aktiv abgelehnt (486 Busy). Sinnvoll,
-  falls eure Ring-Group sonst auf alle Mitglieder wartet und sich dadurch
-  verzögert.
+Ein eingehender Anruf klingelt zunächst rund 25 Sekunden lang, in denen ihr
+ihn im Dashboard annehmen könnt (siehe Schritt 5). Reagiert niemand, greift
+danach:
+
+- **`log_only`** (Standard): keine aktive Antwort außer „Ringing" – eure
+  echten Telefone/Apps klingeln normal weiter und können den Anruf annehmen.
+- **`decline`**: Anruf wird nach Ablauf der 25 Sekunden aktiv abgelehnt (486
+  Busy). Sinnvoll, falls eure Ring-Group sonst auf alle Mitglieder wartet und
+  sich dadurch verzögert.
 
 ## Bekannte Grenzen
 
-- **Nur Anruf-Erkennung, kein Audio.** Dieses Add-on führt/beantwortet keine
-  Gespräche – es erkennt eingehende Anrufe (Nummer, Zeitpunkt) und loggt sie.
-  Für echtes Telefonieren am PC/Handy wäre ein zusätzlicher Schritt (WebRTC-
-  Bridge) nötig – geplant als möglicher nächster Ausbauschritt.
+- **Nur eingehende Anrufe annehmen, kein aktives Wählen.** Das Add-on kann
+  (noch) nicht selbst Nummern anrufen – nur klingelnde Anrufe entgegennehmen.
+- **Immer nur ein Anruf gleichzeitig.** Ein zweiter eingehender Anruf während
+  eines bereits laufenden wird wie gewohnt behandelt (klingelt, loggt), lässt
+  sich aber erst annehmen, wenn der erste beendet ist.
+- **Telefonie von unterwegs braucht eine öffentliche Adresse + Portfreigabe**
+  (siehe Schritt 5) – ohne `turn_public_host` funktioniert das Annehmen nur im
+  selben LAN wie der Add-on-Host.
 - **Ausgehende externe Anrufe** funktionieren über so registrierte
   Drittanbieter-Geräte laut mehreren Community-Berichten teils nicht
-  zuverlässig (Fehler „486 Busy"). Für dieses Add-on ist das irrelevant, da es
-  selbst nichts anruft.
+  zuverlässig (Fehler „486 Busy"). Für den reinen Empfang/Annehmen über dieses
+  Add-on ist das irrelevant.
 - Der Workaround ist **inoffiziell** und kann jederzeit von Ubiquiti geändert
   oder entfernt werden.

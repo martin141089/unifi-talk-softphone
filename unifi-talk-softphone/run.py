@@ -4,6 +4,8 @@ import html
 import json
 import logging
 import os
+import secrets
+import socket
 import sys
 import time
 from pathlib import Path
@@ -11,6 +13,7 @@ from pathlib import Path
 import aiohttp
 from aiohttp import web
 
+import webrtc_bridge
 from sip_client import SipClient
 
 logging.basicConfig(
@@ -39,6 +42,19 @@ CALL_HANDLING = opts.get("call_handling") or "log_only"
 NOTIFY_ON_CALL = bool(opts.get("notify_on_call", True))
 REGISTER_EXPIRY = int(opts.get("register_expiry") or 300)
 
+# Telefonie (WebRTC-Bruecke via coturn/aiortc) - siehe webrtc_bridge.py. Ohne
+# turn_public_host funktioniert das Annehmen/Telefonieren nur im selben LAN wie
+# der Add-on-Host (reine Host-ICE-Kandidaten); mit turn_public_host (oeffentliche
+# IP/DynDNS-Name + Portfreigabe am Router) auch von unterwegs.
+ENABLE_CALLING = bool(opts.get("enable_calling", True))
+TURN_USERNAME = (opts.get("turn_username") or "softphone").strip()
+TURN_PASSWORD = (opts.get("turn_password") or "").strip() or secrets.token_urlsafe(16)
+TURN_PUBLIC_HOST = (opts.get("turn_public_host") or "").strip()
+TURN_RELAY_PORT_START = int(opts.get("turn_relay_port_start") or 49160)
+TURN_RELAY_PORT_END = int(opts.get("turn_relay_port_end") or 49200)
+TURN_PORT = 3478
+TURN_CONFIG_PATH = Path("/data/turnserver.conf")
+
 CALL_LOG_PATH = Path("/data/call_log.json")
 CALL_LOG_LOCK = asyncio.Lock()
 MAX_CALL_LOG_ENTRIES = 200
@@ -51,12 +67,29 @@ HA_API_BASE = "http://supervisor/core/api"
 HA_NOTIFICATION_ID = "unifi_talk_incoming_call"
 
 STATUS = {"registered": False, "last_error": None, "last_change": None}
+SIP_CLIENT = None
+ACTIVE_CALL_SESSION = None
+_SHUTTING_DOWN = False
 
 
 def _on_registered(registered, error):
     STATUS["registered"] = registered
     STATUS["last_error"] = error
     STATUS["last_change"] = datetime.datetime.now().isoformat(timespec="seconds")
+
+
+def _on_hangup():
+    """Wird von sip_client aufgerufen, wenn die Gegenseite (Anrufer oder
+    UniFi-Console) per BYE/CANCEL auflegt - schliesst eine ggf. noch offene
+    WebRTC-Bruecke zum Browser mit."""
+    asyncio.create_task(_close_active_call_session())
+
+
+async def _close_active_call_session():
+    global ACTIVE_CALL_SESSION
+    if ACTIVE_CALL_SESSION:
+        await ACTIVE_CALL_SESSION.close()
+        ACTIVE_CALL_SESSION = None
 
 
 def _load_call_log():
@@ -140,6 +173,81 @@ def format_ts(ts):
     return datetime.datetime.fromtimestamp(ts).strftime("%d.%m.%Y %H:%M:%S")
 
 
+# --- coturn (TURN/STUN-Relay fuer WebRTC) -----------------------------------
+
+def _resolve_turn_external_ip():
+    """Loest turn_public_host (feste IP oder DynDNS-Name) einmalig beim Start
+    auf - coturn selbst kann keine Hostnamen als external-ip verwenden, nur
+    Adressen. Bei DynDNS wird dadurch jeweils der beim Start aktuelle Wert
+    verwendet (aendert sich die IP waehrenddessen, hilft nur ein Neustart)."""
+    if not TURN_PUBLIC_HOST:
+        return None
+    try:
+        return socket.gethostbyname(TURN_PUBLIC_HOST)
+    except OSError as e:
+        log.warning("turn_public_host '%s' konnte nicht aufgeloest werden: %s", TURN_PUBLIC_HOST, e)
+        return None
+
+
+def _write_turn_config():
+    external_ip = _resolve_turn_external_ip()
+    lines = [
+        f"listening-port={TURN_PORT}",
+        "fingerprint",
+        "lt-cred-mech",
+        f"user={TURN_USERNAME}:{TURN_PASSWORD}",
+        "realm=unifi-talk-softphone",
+        f"min-port={TURN_RELAY_PORT_START}",
+        f"max-port={TURN_RELAY_PORT_END}",
+        "no-cli",
+        "no-tls",
+        "no-dtls",
+    ]
+    if external_ip:
+        lines.append(f"external-ip={external_ip}")
+    else:
+        log.warning(
+            "turn_public_host nicht gesetzt (oder nicht aufloesbar) - Telefonie funktioniert "
+            "dadurch nur im selben LAN wie dieser Add-on-Host, nicht von unterwegs.",
+        )
+    TURN_CONFIG_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+async def _log_coturn_output(proc):
+    if proc.stdout:
+        async for line in proc.stdout:
+            log.debug("coturn: %s", line.decode(errors="replace").rstrip())
+    code = await proc.wait()
+    if code != 0 and not _SHUTTING_DOWN:
+        log.warning("coturn wurde mit Exit-Code %s beendet", code)
+
+
+async def _start_coturn():
+    _write_turn_config()
+    proc = await asyncio.create_subprocess_exec(
+        "turnserver", "-c", str(TURN_CONFIG_PATH),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+    )
+    log.info(
+        "coturn (TURN-Server) gestartet auf Port %s (Relay-Range %s-%s)",
+        TURN_PORT, TURN_RELAY_PORT_START, TURN_RELAY_PORT_END,
+    )
+    asyncio.create_task(_log_coturn_output(proc))
+    return proc
+
+
+def _ice_servers_for_browser():
+    host = TURN_PUBLIC_HOST or (SIP_CLIENT.local_ip if SIP_CLIENT else None)
+    if not host:
+        return []
+    return [
+        {"urls": f"stun:{host}:{TURN_PORT}"},
+        {"urls": f"turn:{host}:{TURN_PORT}", "username": TURN_USERNAME, "credential": TURN_PASSWORD},
+    ]
+
+
+# --- Dashboard ---------------------------------------------------------------
+
 PAGE_STYLE = """
 body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 24px;
        background: #f4f5f7; color: #1c1e21; }
@@ -158,6 +266,12 @@ ol li { margin-bottom: 10px; }
 code { background: #eef0f2; padding: 1px 5px; border-radius: 4px; }
 .warn { background: #fff8e6; border: 1px solid #f0dca0; border-radius: 8px; padding: 10px 14px;
         font-size: .9rem; margin-bottom: 16px; }
+.call-banner { background: #e8f4ea; border: 1px solid #9fd6ac; display: none; }
+.call-banner.active { background: #e9f0ff; border: 1px solid #a9c3f5; }
+.call-banner button { padding: 8px 16px; border-radius: 6px; border: none; cursor: pointer;
+                       font-size: .95rem; margin-right: 8px; margin-top: 10px; }
+.btn-answer { background: #1b8a3d; color: #fff; }
+.btn-decline, .btn-hangup { background: #c0392b; color: #fff; }
 """
 
 
@@ -186,6 +300,132 @@ def render_dashboard(status, calls):
     else:
         table = '<div class="empty">Noch keine Anrufe erkannt.</div>'
 
+    calling_card = ""
+    calling_script = ""
+    if ENABLE_CALLING:
+        turn_hint = "" if TURN_PUBLIC_HOST else (
+            '<div class="warn">Kein <code>turn_public_host</code> konfiguriert - Annehmen/Telefonieren '
+            "funktioniert dadurch nur im selben WLAN/LAN wie dieser Add-on-Host, nicht von unterwegs.</div>"
+        )
+        calling_card = f"""
+<div class="card">
+<h2 style="margin-top:0;font-size:1.1rem;">Telefonie</h2>
+{turn_hint}
+<div id="ringing-banner" class="card call-banner">
+  <div id="ringing-text"></div>
+  <button id="btn-answer" class="btn-answer">Annehmen</button>
+  <button id="btn-decline" class="btn-decline">Ablehnen</button>
+</div>
+<div id="active-banner" class="card call-banner active">
+  <div id="active-text">Verbunden</div>
+  <audio id="remote-audio" autoplay></audio>
+  <button id="btn-hangup" class="btn-hangup">Auflegen</button>
+</div>
+<div id="idle-text" class="empty">Aktuell klingelt kein Anruf.</div>
+</div>
+"""
+        calling_script = """
+<script>
+let pc = null;
+
+function showRinging(caller) {
+  document.getElementById("ringing-text").textContent =
+    "Eingehender Anruf: " + (caller.name || "(unbekannt)") + " <" + caller.number + ">";
+  document.getElementById("ringing-banner").style.display = "block";
+  document.getElementById("active-banner").style.display = "none";
+  document.getElementById("idle-text").style.display = "none";
+}
+
+function showActive() {
+  document.getElementById("ringing-banner").style.display = "none";
+  document.getElementById("active-banner").style.display = "block";
+  document.getElementById("idle-text").style.display = "none";
+}
+
+function showIdle() {
+  document.getElementById("ringing-banner").style.display = "none";
+  document.getElementById("active-banner").style.display = "none";
+  document.getElementById("idle-text").style.display = "block";
+}
+
+async function poll() {
+  try {
+    const r = await fetch("api/ringing");
+    const data = await r.json();
+    if (pc) return;  // waehrend eines laufenden/verbundenen Anrufs nicht ueberschreiben
+    if (data.ringing) {
+      showRinging(data.ringing.caller);
+    } else if (data.active) {
+      showActive();
+    } else {
+      showIdle();
+    }
+  } catch (e) { /* naechster Versuch in 1.5s */ }
+}
+
+async function answerCall() {
+  try {
+    const iceResp = await fetch("api/ice-servers");
+    const iceServers = await iceResp.json();
+    pc = new RTCPeerConnection({ iceServers });
+    pc.ontrack = (event) => {
+      document.getElementById("remote-audio").srcObject = event.streams[0];
+    };
+
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await new Promise((resolve) => {
+      if (pc.iceGatheringState === "complete") return resolve();
+      pc.addEventListener("icegatheringstatechange", () => {
+        if (pc.iceGatheringState === "complete") resolve();
+      });
+    });
+
+    const resp = await fetch("webrtc/offer", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      alert("Anruf konnte nicht angenommen werden: " + (err.error || resp.status));
+      pc.close();
+      pc = null;
+      showIdle();
+      return;
+    }
+    const answer = await resp.json();
+    await pc.setRemoteDescription(answer);
+    showActive();
+  } catch (e) {
+    alert("Annehmen fehlgeschlagen: " + e);
+    if (pc) { pc.close(); pc = null; }
+    showIdle();
+  }
+}
+
+async function declineCall() {
+  showIdle();
+  await fetch("call/decline", { method: "POST" });
+}
+
+async function hangupCall() {
+  await fetch("call/hangup", { method: "POST" });
+  if (pc) { pc.close(); pc = null; }
+  showIdle();
+}
+
+document.getElementById("btn-answer").addEventListener("click", answerCall);
+document.getElementById("btn-decline").addEventListener("click", declineCall);
+document.getElementById("btn-hangup").addEventListener("click", hangupCall);
+setInterval(poll, 1500);
+poll();
+</script>
+"""
+
     return f"""<!DOCTYPE html>
 <html lang="de">
 <head>
@@ -195,11 +435,13 @@ def render_dashboard(status, calls):
 </head>
 <body>
 <h1>&#128222; UniFi Talk Softphone</h1>
-<div class="sub">Anrufer-Übersicht &amp; SIP-Setup</div>
+<div class="sub">Anrufer-Übersicht, Telefonie &amp; SIP-Setup</div>
 
 <div class="card">
 <strong>Status:</strong> {status_html}
 </div>
+
+{calling_card}
 
 <div class="card">
 <h2 style="margin-top:0;font-size:1.1rem;">Anruf-Historie</h2>
@@ -222,10 +464,14 @@ weiter normal klingeln.</li>
 <code>fs_cli -x "user_data 0007@talk.com param password"</code></li>
 <li><strong>In der Add-on-Konfiguration eintragen:</strong> <code>talk_sip_host</code>
 (Management-IP der Console), <code>sip_extension</code>, <code>sip_password</code>.</li>
+<li>Für Telefonie von unterwegs zusätzlich <code>turn_public_host</code> setzen (öffentliche
+IP/DynDNS-Name) und am Router UDP-Port <code>3478</code> sowie die Relay-Port-Range
+(Standard <code>49160-49200</code>) auf diesen Add-on-Host weiterleiten.</li>
 <li>Add-on speichern und <strong>neu starten</strong>.</li>
 </ol>
 </div>
 
+{calling_script}
 </body>
 </html>"""
 
@@ -240,20 +486,90 @@ async def api_calls(request):
     return web.json_response({"status": STATUS, "calls": list(reversed(calls))})
 
 
+async def api_ringing(request):
+    ringing = SIP_CLIENT.get_ringing_call() if SIP_CLIENT else None
+    active = bool(SIP_CLIENT and SIP_CLIENT.active_call)
+    return web.json_response({"ringing": ringing, "active": active})
+
+
+async def api_ice_servers(request):
+    return web.json_response(_ice_servers_for_browser())
+
+
+async def webrtc_offer(request):
+    global ACTIVE_CALL_SESSION
+    if not ENABLE_CALLING or not SIP_CLIENT:
+        return web.json_response({"error": "Telefonie-Funktion ist deaktiviert"}, status=404)
+    if not SIP_CLIENT.get_ringing_call():
+        return web.json_response({"error": "Es klingelt gerade kein Anruf"}, status=409)
+
+    try:
+        data = await request.json()
+    except json.JSONDecodeError:
+        return web.json_response({"error": "Ungueltiges JSON"}, status=400)
+
+    try:
+        rtp = await SIP_CLIENT.answer_ringing_call()
+    except RuntimeError as e:
+        return web.json_response({"error": str(e)}, status=409)
+
+    payload_type = SIP_CLIENT.active_call["payload_type"]
+    ice_servers = webrtc_bridge.build_ice_servers(
+        TURN_PUBLIC_HOST or SIP_CLIENT.local_ip, TURN_PORT, TURN_USERNAME, TURN_PASSWORD,
+    )
+    call = webrtc_bridge.CallSession(rtp, payload_type, ice_servers)
+    try:
+        answer_sdp, answer_type = await call.accept_offer(data["sdp"], data["type"])
+    except Exception as e:
+        log.exception("WebRTC-Verhandlung fuer eingehenden Anruf fehlgeschlagen")
+        await call.close()
+        return web.json_response({"error": f"WebRTC-Verhandlung fehlgeschlagen: {e}"}, status=500)
+
+    ACTIVE_CALL_SESSION = call
+    return web.json_response({"sdp": answer_sdp, "type": answer_type})
+
+
+async def call_decline(request):
+    if SIP_CLIENT:
+        SIP_CLIENT.decline_ringing_call()
+    return web.json_response({"ok": True})
+
+
+async def call_hangup(request):
+    if SIP_CLIENT:
+        await SIP_CLIENT.hangup_active_call()
+    await _close_active_call_session()
+    return web.json_response({"ok": True})
+
+
 def build_dashboard_app(http_session):
     app = web.Application()
     app["http"] = http_session
     app.router.add_get("/", dashboard_page)
     app.router.add_get("/api/calls", api_calls)
+    app.router.add_get("/api/ringing", api_ringing)
+    app.router.add_get("/api/ice-servers", api_ice_servers)
+    app.router.add_post("/webrtc/offer", webrtc_offer)
+    app.router.add_post("/call/decline", call_decline)
+    app.router.add_post("/call/hangup", call_hangup)
     return app
 
 
 async def main():
+    global SIP_CLIENT, _SHUTTING_DOWN
+
     if not (TALK_SIP_HOST and SIP_EXTENSION and SIP_PASSWORD):
         log.error(
             "talk_sip_host, sip_extension und sip_password muessen konfiguriert sein - "
             "siehe Dokumentations-Tab (DOCS.md) fuer die Einrichtung.",
         )
+
+    coturn_proc = None
+    if ENABLE_CALLING:
+        try:
+            coturn_proc = await _start_coturn()
+        except (OSError, FileNotFoundError) as e:
+            log.error("coturn konnte nicht gestartet werden - Telefonie bleibt ohne Audio: %s", e)
 
     timeout = aiohttp.ClientTimeout(total=10)
     async with aiohttp.ClientSession(timeout=timeout) as http_session:
@@ -261,7 +577,7 @@ async def main():
         def on_call(caller):
             asyncio.create_task(_handle_incoming_call(http_session, caller))
 
-        sip_client = SipClient(
+        SIP_CLIENT = SipClient(
             host=TALK_SIP_HOST,
             port=TALK_SIP_PORT,
             local_port=LOCAL_SIP_PORT,
@@ -272,10 +588,11 @@ async def main():
             call_handling=CALL_HANDLING,
             on_call=on_call,
             on_registered=_on_registered,
+            on_hangup=_on_hangup,
         )
 
         if TALK_SIP_HOST and SIP_EXTENSION and SIP_PASSWORD:
-            await sip_client.start()
+            await SIP_CLIENT.start()
 
         dashboard_runner = web.AppRunner(build_dashboard_app(http_session))
         await dashboard_runner.setup()
@@ -285,8 +602,12 @@ async def main():
         try:
             await asyncio.Event().wait()
         finally:
-            await sip_client.stop()
+            _SHUTTING_DOWN = True
+            await _close_active_call_session()
+            await SIP_CLIENT.stop()
             await dashboard_runner.cleanup()
+            if coturn_proc:
+                coturn_proc.terminate()
 
 
 async def _handle_incoming_call(http_session, caller):
