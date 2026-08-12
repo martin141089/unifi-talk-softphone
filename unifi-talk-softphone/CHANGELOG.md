@@ -2,6 +2,24 @@
 
 Alle nennenswerten Änderungen an diesem Add-on werden hier dokumentiert.
 
+## [0.3.4]
+
+### Behoben
+- **Ausgehende Anrufe scheiterten an einer verschachtelten Digest-Challenge.**
+  `dial()` beantwortete nur eine einzelne 401/407-Challenge und behandelte
+  jede weitere Challenge als endgültige Ablehnung. UniFi Talk (FreeSWITCH)
+  kann ein INVITE aber über mehrere interne Hops führen (z. B. Registrar-Realm
+  und separat einen Trunk/Gateway-Realm), die jeweils eigenständig
+  herausfordern - und vergisst dabei zusätzlich den bereits erfüllten
+  Auth-Header des vorherigen Hops, wenn nur der neueste mitgeschickt wird.
+  `dial()` sammelt jetzt alle bisher berechneten Auth-Header (nach
+  Header-Name) und schickt sie gemeinsam bei jedem Retry mit, über bis zu
+  3 Runden.
+- Jede INVITE-Challenge wird jetzt mit vollem Header-Inhalt geloggt
+  (Realm/Nonce/qop) - erleichtert die Diagnose, falls eine Challenge-Schleife
+  trotzdem nicht aufgelöst werden kann (dann vermutlich ein echtes
+  Berechtigungsproblem auf Console-Seite statt eines Auth-Bugs).
+
 ## [0.3.3]
 
 ### Behoben

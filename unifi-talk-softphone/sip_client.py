@@ -653,7 +653,19 @@ class SipClient:
                 self._send(self._build_invite(target_uri, our_uri, from_tag, call_id, cseq, offer_body))
                 resp = await self._wait_invite_final(queue, timeout=40)
 
-                if resp is not None and resp.status_code in (401, 407):
+                # Manche FreeSWITCH-Setups (wie bei UniFi Talk) haengen ein INVITE
+                # ueber mehrere interne Hops (Registrar-Realm, dann ggf. ein
+                # separater Trunk/Gateway-Realm) - jeder Hop kann eigenstaendig
+                # per 401/407 herausfordern. Alle bisher gesammelten Auth-Header
+                # (nach Header-Name dedupliziert) werden bei jedem Retry erneut
+                # mitgeschickt, sonst "vergisst" der naechste Versuch die bereits
+                # erfuellte Challenge eines vorherigen Hops. Bis zu 3 Runden, um
+                # verschachtelte Challenges (Registrar + Trunk) abzudecken, ohne
+                # bei einer echten Ablehnung endlos weiterzuversuchen.
+                auth_headers = {}
+                rounds = 0
+                while resp is not None and resp.status_code in (401, 407) and rounds < 3:
+                    rounds += 1
                     # Jede finale Antwort auf ein INVITE muss per ACK bestaetigt
                     # werden, auch eine Challenge - erst danach darf mit
                     # Zugangsdaten in einer NEUEN Transaktion (neue CSeq, gleiche
@@ -664,14 +676,26 @@ class SipClient:
                     if not params:
                         raise RuntimeError("Digest-Challenge konnte nicht gelesen werden")
                     auth_header_name = "Authorization" if resp.status_code == 401 else "Proxy-Authorization"
-                    auth_header = _build_authorization(
+                    log.info(
+                        "INVITE-Challenge #%d fuer %s: %s: %s",
+                        rounds, number, challenge_header, resp.get(challenge_header),
+                    )
+                    auth_headers[auth_header_name] = _build_authorization(
                         self.extension, self.password, "INVITE", target_uri, params, header_name=auth_header_name,
                     )
                     cseq = self._next_cseq()
                     self._send(self._build_invite(
-                        target_uri, our_uri, from_tag, call_id, cseq, offer_body, auth_header=auth_header,
+                        target_uri, our_uri, from_tag, call_id, cseq, offer_body,
+                        auth_headers=list(auth_headers.values()),
                     ))
                     resp = await self._wait_invite_final(queue, timeout=40)
+
+                if resp is not None and resp.status_code in (401, 407):
+                    log.warning(
+                        "INVITE fuer %s haengt nach %d Auth-Runden weiter in einer Challenge-Schleife "
+                        "(zuletzt %s) - vermutlich kein Digest-, sondern ein Berechtigungsproblem "
+                        "auf der Console-Seite.", number, rounds, resp.status_code,
+                    )
 
                 if resp is None:
                     raise RuntimeError("Keine Antwort (Zeitüberschreitung)")
@@ -703,7 +727,7 @@ class SipClient:
             rtp.close()
             raise
 
-    def _build_invite(self, request_uri, from_uri, from_tag, call_id, cseq, sdp_body, auth_header=None):
+    def _build_invite(self, request_uri, from_uri, from_tag, call_id, cseq, sdp_body, auth_headers=None):
         branch = "z9hG4bK" + _gen_token(16)
         lines = [
             f"INVITE {request_uri} SIP/2.0",
@@ -717,7 +741,7 @@ class SipClient:
             "Content-Type: application/sdp",
             "User-Agent: unifi-talk-softphone/0.1",
         ]
-        if auth_header:
+        for auth_header in (auth_headers or []):
             lines.append(auth_header)
         body_bytes = sdp_body.encode("utf-8")
         lines.append(f"Content-Length: {len(body_bytes)}")
