@@ -662,7 +662,14 @@ class SipClient:
 
             call_id = _gen_token(16) + "@unifi-talk-softphone"
             from_tag = _gen_token(10)
-            target_uri = f"sip:{number}@{self.domain}"
+            # DIAGNOSE (temporaer): externe Ziele bekommen sofort 404, auch mit
+            # verschiedenen Nummernformaten - interne Extensions routen aber
+            # unter derselben Domain (self.domain) problemlos. Testet, ob die
+            # Console fuer Nicht-Extension-Ziele stattdessen die Console-IP
+            # (self.host) als Ziel-Domain im Request-URI erwartet statt
+            # self.domain ("talk.com").
+            target_domain = self.host if len(number) > 5 else self.domain
+            target_uri = f"sip:{number}@{target_domain}"
             our_uri = f"sip:{self.extension}@{self.domain}"
 
             queue = asyncio.Queue()

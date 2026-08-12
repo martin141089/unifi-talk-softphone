@@ -2,6 +2,18 @@
 
 Alle nennenswerten Änderungen an diesem Add-on werden hier dokumentiert.
 
+## [0.3.8] – Diagnose-Build
+
+### Geändert
+- **Experimentell:** Für Ziele mit mehr als 5 Zeichen (also keine 4-stellige
+  interne Extension) verwendet `dial()` jetzt die Console-IP (`talk_sip_host`)
+  statt `sip_domain` als Ziel-Domain im Request-URI. Hintergrund: mehrere
+  Nummernformate für externe Rufnummern scheiterten alle sofort mit
+  `404 Not Found`, während interne Extensions (4-stellig) unter derselben
+  Domain zuverlässig routen - das deutet auf eine falsche Ziel-Domain im
+  Request-URI hin, nicht auf das Nummernformat. Dieser Build testet die
+  Hypothese; wird sie nicht bestätigt, wird die Änderung zurückgenommen.
+
 ## [0.3.7]
 
 ### Behoben
