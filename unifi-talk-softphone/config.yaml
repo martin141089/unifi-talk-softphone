@@ -1,7 +1,7 @@
 name: "UniFi Talk Softphone"
-version: "0.4.0"
+version: "0.5.0"
 slug: "unifi_talk_softphone"
-description: "Anrufer-Erkennung & -Log für UniFi Talk (Softphone-Workaround für Deutschland) von Martin Henschke"
+description: "SIP-Softphone (annehmen & wählen) für UniFi Talk (Softphone-Workaround für Deutschland) von Martin Henschke"
 url: "https://github.com/martin141089/unifi-talk-softphone"
 
 arch:
@@ -35,6 +35,10 @@ options:
   notify_on_call: true
   register_expiry: 300
 
+  enable_calling: true
+  cf_turn_key_id: ""
+  cf_turn_api_token: ""
+
 schema:
   talk_sip_host: str
   talk_sip_port: port
@@ -45,3 +49,7 @@ schema:
   call_handling: list(log_only|decline)
   notify_on_call: bool
   register_expiry: int
+
+  enable_calling: bool
+  cf_turn_key_id: str?
+  cf_turn_api_token: password?

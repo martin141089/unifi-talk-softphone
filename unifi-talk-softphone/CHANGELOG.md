@@ -2,6 +2,50 @@
 
 Alle nennenswerten Änderungen an diesem Add-on werden hier dokumentiert.
 
+## [0.5.0]
+
+### Hinzugefügt
+- **Telefonie-Feature (Annehmen & Wählen) wiederhergestellt** (in 0.4.0
+  entfernt). Hintergrund: mit TalkAnchor (separates Projekt, hält die von
+  UniFi Talk intern gespeicherte öffentliche IP bei dynamischer IP aktuell)
+  ist die wahrscheinliche Ursache der zuvor beobachteten Audio-Aussetzer
+  behoben - eine falsche öffentliche IP in der SDP erklärt das Muster aus
+  dem Support-File (Anruf signalisiert "answered"/"bridged", aber kein Ton).
+  `webrtc_bridge.py`, RTP/SDP-Handling, `answer_ringing_call()`, `dial()`,
+  `hangup_active_call()` in `sip_client.py` sowie die WebRTC-Endpunkte und
+  Cloudflare-TURN-Integration in `run.py` sind identisch zum Stand vor 0.4.0
+  wiederhergestellt. **Wichtig:** Das ändert nichts an der separat
+  bestätigten architektonischen Grenze für externe (PSTN-)Rufnummern (siehe
+  0.3.9) - die bleibt bestehen, UniFi Talk routet externe Ziele weiterhin nur
+  über eine interne Anwendungslogik, nicht per SIP-INVITE. Wählen
+  funktioniert daher nur zu internen Extensions/Third-Party-Geräten.
+
+### Behoben
+- **Mikrofon-Zugriff in der Home-Assistant-App fälschlich als pauschal
+  nicht unterstützt gemeldet.** Die bisherige Meldung ("die App-WebView
+  stellt kein navigator.mediaDevices bereit") war eine Fehldiagnose: sowohl
+  die iOS- als auch die Android-Companion-App unterstützen Mikrofonzugriff
+  in eingebetteten Ingress-Panels bereits seit Jahren (iOS seit App-Version
+  2020.8, `NSMicrophoneUsageDescription`). Der tatsächlich wahrscheinlichste
+  Grund für ein fehlendes `navigator.mediaDevices` ist ein fehlender
+  *secure context* - `getUserMedia()` ist browserübergreifend nur über HTTPS
+  oder `localhost` verfügbar, nicht über eine lokale `http://`-IP-Adresse,
+  unabhängig von App oder Browser. `checkMicSupport()` prüft jetzt zuerst
+  `window.isSecureContext` und zeigt bei fehlendem HTTPS eine konkrete,
+  umsetzbare Fehlermeldung (Hinweis auf die eigene HTTPS-Adresse statt einer
+  lokalen IP) statt pauschal zur Nutzung von Safari/Chrome zu raten.
+
+### Geändert
+- **Anruf-Historie-Tabelle und Dashboard responsive gemacht.** Fehlendes
+  `<meta name="viewport">` liess mobile Browser die Seite in einem virtuellen
+  980px-Viewport rendern und verkleinert darstellen statt sie an die
+  tatsächliche Bildschirmbreite anzupassen - jetzt gesetzt. Die
+  Anruf-Tabelle steckt zusätzlich in einem `overflow-x:auto`-Container statt
+  das Seiten-Layout zu sprengen, falls sie trotzdem breiter als der
+  Bildschirm ist. Padding/Schriftgröße von Karten und Tabelle sowie das
+  Wähl-Eingabefeld (jetzt volle Breite, Button darunter) passen sich per
+  Media-Query unter 480px an.
+
 ## [0.4.0]
 
 ### Entfernt

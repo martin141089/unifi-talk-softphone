@@ -4,6 +4,7 @@ import html
 import json
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -11,6 +12,7 @@ from pathlib import Path
 import aiohttp
 from aiohttp import web
 
+import webrtc_bridge
 from sip_client import SipClient
 
 logging.basicConfig(
@@ -39,6 +41,18 @@ CALL_HANDLING = opts.get("call_handling") or "log_only"
 NOTIFY_ON_CALL = bool(opts.get("notify_on_call", True))
 REGISTER_EXPIRY = int(opts.get("register_expiry") or 300)
 
+# Telefonie (WebRTC-Bruecke, siehe webrtc_bridge.py). Fuer die TURN-Relay-Seite
+# (noetig, damit das Annehmen/Telefonieren auch von unterwegs funktioniert, nicht
+# nur im LAN) wird Cloudflares gehosteter TURN-Dienst genutzt (turn.cloudflare.com,
+# Teil von "Cloudflare Realtime") statt eines selbst betriebenen Servers - kein
+# Port-Forwarding noetig. Ohne cf_turn_key_id/cf_turn_api_token funktioniert das
+# Annehmen trotzdem, dann aber nur im selben LAN wie der Add-on-Host (reine
+# Host-ICE-Kandidaten).
+ENABLE_CALLING = bool(opts.get("enable_calling", True))
+CF_TURN_KEY_ID = (opts.get("cf_turn_key_id") or "").strip()
+CF_TURN_API_TOKEN = (opts.get("cf_turn_api_token") or "").strip()
+CF_TURN_TTL = 3600  # Gueltigkeit der kurzlebigen TURN-Zugangsdaten in Sekunden
+
 CALL_LOG_PATH = Path("/data/call_log.json")
 CALL_LOG_LOCK = asyncio.Lock()
 MAX_CALL_LOG_ENTRIES = 200
@@ -52,12 +66,27 @@ HA_NOTIFICATION_ID = "unifi_talk_incoming_call"
 
 STATUS = {"registered": False, "last_error": None, "last_change": None}
 SIP_CLIENT = None
+ACTIVE_CALL_SESSION = None
 
 
 def _on_registered(registered, error):
     STATUS["registered"] = registered
     STATUS["last_error"] = error
     STATUS["last_change"] = datetime.datetime.now().isoformat(timespec="seconds")
+
+
+def _on_hangup():
+    """Wird von sip_client aufgerufen, wenn die Gegenseite (Anrufer oder
+    UniFi-Console) per BYE/CANCEL auflegt - schliesst eine ggf. noch offene
+    WebRTC-Bruecke zum Browser mit."""
+    asyncio.create_task(_close_active_call_session())
+
+
+async def _close_active_call_session():
+    global ACTIVE_CALL_SESSION
+    if ACTIVE_CALL_SESSION:
+        await ACTIVE_CALL_SESSION.close()
+        ACTIVE_CALL_SESSION = None
 
 
 def _load_call_log():
@@ -141,26 +170,90 @@ def format_ts(ts):
     return datetime.datetime.fromtimestamp(ts).strftime("%d.%m.%Y %H:%M:%S")
 
 
+# --- Cloudflare Realtime TURN ------------------------------------------------
+
+CF_TURN_API = "https://rtc.live.cloudflare.com/v1/turn/keys/{key_id}/credentials/generate-ice-servers"
+
+
+async def fetch_cf_ice_servers(http_session):
+    """Holt kurzlebige TURN-Zugangsdaten von Cloudflares gehostetem TURN-Dienst
+    (Teil von "Cloudflare Realtime", vormals "Calls") - ersetzt einen selbst
+    betriebenen TURN-Server, ganz ohne Port-Forwarding am Router. Ohne
+    konfigurierte cf_turn_key_id/cf_turn_api_token (oder bei einem Fehler) wird
+    eine leere Liste zurueckgegeben - WebRTC funktioniert dann nur ueber reine
+    Host-Kandidaten, also nur im selben LAN wie der Add-on-Host."""
+    if not (CF_TURN_KEY_ID and CF_TURN_API_TOKEN):
+        return []
+    url = CF_TURN_API.format(key_id=CF_TURN_KEY_ID)
+    try:
+        async with http_session.post(
+            url,
+            headers={"Authorization": f"Bearer {CF_TURN_API_TOKEN}", "Content-Type": "application/json"},
+            json={"ttl": CF_TURN_TTL},
+        ) as r:
+            r.raise_for_status()
+            data = await r.json()
+    except aiohttp.ClientError as e:
+        log.warning("Cloudflare-TURN-Zugangsdaten konnten nicht abgerufen werden: %s", e)
+        return []
+
+    servers = data.get("iceServers") or []
+    if isinstance(servers, dict):
+        servers = [servers]
+
+    # Der alternative Port 53 wird von Browsern blockiert (siehe Cloudflare-Doku)
+    # - ohne Trickle-ICE (wir warten auf vollstaendiges Gathering, siehe
+    # webrtc_bridge.CallSession._wait_ice_complete) fuehrt das sonst nur zu
+    # unnoetigen Timeout-Verzoegerungen beim Verbindungsaufbau. Wichtig: exakt
+    # Port 53 matchen, nicht nur die Zeichenkette ":53" - sonst faellt z.B. Port
+    # 5349 (TURNS) faelschlich mit raus.
+    filtered = []
+    for s in servers:
+        urls = s.get("urls")
+        if isinstance(urls, list):
+            urls = [u for u in urls if not re.search(r":53(?:\?|$)", u)]
+        filtered.append({**s, "urls": urls})
+    return filtered
+
+
 # --- Dashboard ---------------------------------------------------------------
 
 PAGE_STYLE = """
-body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 24px;
+* { box-sizing: border-box; }
+body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 16px;
        background: #f4f5f7; color: #1c1e21; }
-h1 { font-size: 1.4rem; margin-bottom: 4px; }
-.sub { color: #666; margin-bottom: 20px; }
-.card { background: #fff; border-radius: 10px; padding: 18px 20px; margin-bottom: 20px;
+h1 { font-size: 1.3rem; margin-bottom: 4px; }
+.sub { color: #666; margin-bottom: 20px; font-size: .9rem; }
+.card { background: #fff; border-radius: 10px; padding: 16px; margin-bottom: 16px;
         box-shadow: 0 1px 3px rgba(0,0,0,.08); }
 .status-ok { color: #1b8a3d; font-weight: 600; }
 .status-bad { color: #c0392b; font-weight: 600; }
-table { width: 100%; border-collapse: collapse; }
-th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #eee; font-size: .92rem; }
+.table-scroll { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table { width: 100%; min-width: 420px; border-collapse: collapse; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #eee; font-size: .92rem;
+         white-space: nowrap; }
 th { color: #666; font-weight: 600; }
 .empty { color: #888; font-style: italic; padding: 8px 0; }
 ol { padding-left: 20px; }
 ol li { margin-bottom: 10px; }
-code { background: #eef0f2; padding: 1px 5px; border-radius: 4px; }
+code { background: #eef0f2; padding: 1px 5px; border-radius: 4px; word-break: break-word; }
 .warn { background: #fff8e6; border: 1px solid #f0dca0; border-radius: 8px; padding: 10px 14px;
         font-size: .9rem; margin-bottom: 16px; }
+.call-banner { background: #e8f4ea; border: 1px solid #9fd6ac; display: none; }
+.call-banner.active { background: #e9f0ff; border: 1px solid #a9c3f5; }
+.call-banner button { padding: 10px 18px; border-radius: 6px; border: none; cursor: pointer;
+                       font-size: .95rem; margin-right: 8px; margin-top: 10px; }
+.btn-answer { background: #1b8a3d; color: #fff; }
+.btn-decline, .btn-hangup { background: #c0392b; color: #fff; }
+#dial-number { max-width: 100%; }
+@media (max-width: 480px) {
+  body { padding: 10px; }
+  .card { padding: 12px; border-radius: 8px; }
+  th, td { padding: 6px 8px; font-size: .85rem; }
+  #dial-box { display: flex; flex-direction: column; gap: 8px; }
+  #dial-number { width: 100% !important; }
+  #btn-dial { width: 100%; }
+}
 """
 
 
@@ -184,25 +277,290 @@ def render_dashboard(status, calls):
             f"<td>{'abgelehnt' if c.get('handling') == 'decline' else 'nur geloggt'}</td></tr>"
             for c in reversed(calls)
         )
-        table = f"<table><thead><tr><th>Zeitpunkt</th><th>Name</th><th>Nummer</th><th>Verhalten</th></tr></thead>" \
-                f"<tbody>{rows}</tbody></table>"
+        table = f'<div class="table-scroll"><table><thead><tr><th>Zeitpunkt</th><th>Name</th>' \
+                f"<th>Nummer</th><th>Verhalten</th></tr></thead>" \
+                f"<tbody>{rows}</tbody></table></div>"
     else:
         table = '<div class="empty">Noch keine Anrufe erkannt.</div>'
+
+    calling_card = ""
+    calling_script = ""
+    if ENABLE_CALLING:
+        turn_hint = "" if (CF_TURN_KEY_ID and CF_TURN_API_TOKEN) else (
+            '<div class="warn">Kein Cloudflare-TURN-Key konfiguriert (<code>cf_turn_key_id</code>/'
+            "<code>cf_turn_api_token</code>) - Annehmen/Telefonieren funktioniert dadurch nur im selben "
+            "WLAN/LAN wie dieser Add-on-Host, nicht von unterwegs.</div>"
+        )
+        calling_card = f"""
+<div class="card">
+<h2 style="margin-top:0;font-size:1.1rem;">Telefonie</h2>
+{turn_hint}
+<div id="ringing-banner" class="card call-banner">
+  <div id="ringing-text"></div>
+  <button id="btn-answer" class="btn-answer">Annehmen</button>
+  <button id="btn-decline" class="btn-decline">Ablehnen</button>
+</div>
+<div id="active-banner" class="card call-banner active">
+  <div id="active-text">Verbunden</div>
+  <audio id="remote-audio" autoplay></audio>
+  <button id="btn-hangup" class="btn-hangup">Auflegen</button>
+</div>
+<div id="idle-text" class="empty">Aktuell klingelt kein Anruf.</div>
+<div id="dial-box" style="margin-top:14px;">
+  <input type="tel" id="dial-number" placeholder="Rufnummer, z. B. +49170..."
+         style="padding:8px 10px;border:1px solid #ccc;border-radius:6px;font-size:.95rem;width:200px;">
+  <button id="btn-dial" class="btn-answer">Anrufen</button>
+</div>
+</div>
+"""
+        calling_script = """
+<script>
+let pc = null;
+
+function showRinging(caller) {
+  document.getElementById("ringing-text").textContent =
+    "Eingehender Anruf: " + (caller.name || "(unbekannt)") + " <" + caller.number + ">";
+  document.getElementById("ringing-banner").style.display = "block";
+  document.getElementById("active-banner").style.display = "none";
+  document.getElementById("idle-text").style.display = "none";
+}
+
+function showActive() {
+  document.getElementById("ringing-banner").style.display = "none";
+  document.getElementById("active-banner").style.display = "block";
+  document.getElementById("idle-text").style.display = "none";
+}
+
+function showIdle() {
+  document.getElementById("ringing-banner").style.display = "none";
+  document.getElementById("active-banner").style.display = "none";
+  document.getElementById("idle-text").style.display = "block";
+}
+
+async function poll() {
+  try {
+    const r = await fetch("api/ringing");
+    const data = await r.json();
+    if (pc) return;  // waehrend eines laufenden/verbundenen Anrufs nicht ueberschreiben
+    if (data.ringing) {
+      showRinging(data.ringing.caller);
+    } else if (data.active) {
+      showActive();
+    } else {
+      showIdle();
+    }
+  } catch (e) { /* naechster Versuch in 1.5s */ }
+}
+
+// Frueher wurde hier pauschal behauptet, die eingebettete Ansicht der
+// Home-Assistant-App unterstuetze keinen Mikrofon-Zugriff - das stimmt so
+// nicht mehr (iOS-Companion-App seit 2020.8, Android-Companion-App analog).
+// Der tatsaechlich haeufigste Grund fuer ein fehlendes navigator.mediaDevices
+// ist ein fehlender "secure context": getUserMedia() ist nur ueber HTTPS
+// (oder localhost) verfuegbar, egal in welchem Browser/welcher App - ruft man
+// Home Assistant z.B. ueber eine lokale http://-Adresse auf (statt ueber den
+// eigenen HTTPS-Zugang, z.B. Cloudflare-Tunnel/Nabu-Casa), fehlt die API
+// komplett, auch in normalen Desktop-Browsern.
+function checkMicSupport() {
+  if (!window.isSecureContext) {
+    alert(
+      "Diese Seite ist nicht ueber eine sichere Verbindung (HTTPS) aufgerufen - Mikrofon-Zugriff " +
+      "ist dadurch blockiert (Browser-Vorgabe, betrifft jeden Browser inkl. der Home-Assistant-App). " +
+      "Bitte Home Assistant ueber die normale HTTPS-Adresse aufrufen (z. B. euren Cloudflare-Tunnel " +
+      "oder Nabu Casa), nicht ueber eine lokale http://-IP-Adresse.",
+    );
+    return false;
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    alert(
+      "Mikrofon-Zugriff wird von diesem Browser/dieser App nicht unterstuetzt. Bitte diese Seite " +
+      "in einem aktuellen Browser (Safari, Chrome) oder der aktuellen Home-Assistant-App oeffnen.",
+    );
+    return false;
+  }
+  return true;
+}
+
+// Gemeinsamer Aufbau fuer beide Richtungen: eigenes Mikrofon einbinden, Offer
+// erzeugen, auf vollstaendiges ICE-Gathering warten (kein Trickle-ICE - der
+// Server erwartet eine bereits vollstaendige Antwort in einem Roundtrip).
+async function createLocalOffer() {
+  // Wichtig: getUserMedia() muss der ALLERERSTE await hier sein. Safari/iOS
+  // verlangt, dass der Mikrofon-Zugriff noch innerhalb der "user activation"
+  // des Klicks angefragt wird - ein vorheriger await (z.B. ein fetch()) reicht
+  // oft schon aus, damit die Aktivierung verfaellt. Die Folge ist nicht ein
+  // Fehler, sondern ein lautlos haengendes Promise ("Knopf ohne Funktion").
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+  const iceResp = await fetch("api/ice-servers");
+  const iceServers = await iceResp.json();
+  const newPc = new RTCPeerConnection({ iceServers });
+  newPc.ontrack = (event) => {
+    document.getElementById("remote-audio").srcObject = event.streams[0];
+  };
+
+  stream.getTracks().forEach((t) => newPc.addTrack(t, stream));
+
+  const offer = await newPc.createOffer();
+  await newPc.setLocalDescription(offer);
+  // Nicht endlos warten: in manchen Mobilfunknetzen wird UDP zum TURN-Server
+  // gedrosselt/blockiert, wodurch das ICE-Gathering nie "complete" meldet -
+  // das liesse den Knopf ohne jede Fehlermeldung haengen. Nach 3s wird mit
+  // den bis dahin gesammelten Kandidaten weitergemacht (fehlt der TURN-Kandidat,
+  // schlaegt die Verbindung spaeter mit einer sichtbaren Fehlermeldung fehl,
+  // statt den Knopf stumm zu blockieren).
+  await new Promise((resolve) => {
+    if (newPc.iceGatheringState === "complete") return resolve();
+    const timer = setTimeout(resolve, 3000);
+    newPc.addEventListener("icegatheringstatechange", () => {
+      if (newPc.iceGatheringState === "complete") {
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+  });
+  return newPc;
+}
+
+// Verhindert, dass ein Doppel-Tap (oder ein Tap waehrend eine vorherige
+// Anfrage noch laeuft, z.B. bei mehreren Auth-Challenge-Runden) zwei parallele
+// Anrufversuche auf denselben Knopf ausloest - die Console beantwortet das
+// sonst mit "500 Overlapping Requests", und lokal kann die zweite Anfrage die
+// globale pc-Variable der ersten ueberschreiben ("pc.close() auf null").
+let callBusy = false;
+
+// Klingelt das Ziel laenger (mobile Netze/Menschen antworten nicht sofort),
+// kann iOS Safari die WebRTC-Verbindung eines im Hintergrund/gesperrten Tabs
+// stillschweigend invalidieren - setRemoteDescription() schlaegt dann mit
+// InvalidStateError fehl, obwohl der Anruf auf SIP-Ebene angenommen wurde.
+// Das ist eine bekannte iOS-Safari-Einschraenkung (siehe DOCS.md), keine
+// eigene Fehlfunktion - hier nur in eine verstaendliche Meldung uebersetzt.
+function describeCallError(e) {
+  if (e && e.name === "InvalidStateError") {
+    return "Verbindung abgebrochen, waehrend das Ziel klingelte - vermutlich hat iOS Safari " +
+      "die Verbindung im Hintergrund/bei gesperrtem Bildschirm beendet. Bildschirm waehrend " +
+      "des Klingelns eingeschaltet und die Seite im Vordergrund lassen, dann erneut versuchen.";
+  }
+  return String(e);
+}
+
+async function answerCall() {
+  if (callBusy) return;
+  if (!checkMicSupport()) { showIdle(); return; }
+  callBusy = true;
+  document.getElementById("btn-answer").disabled = true;
+  let myPc = null;
+  try {
+    myPc = await createLocalOffer();
+    pc = myPc;
+    const resp = await fetch("webrtc/offer", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sdp: myPc.localDescription.sdp, type: myPc.localDescription.type }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      alert("Anruf konnte nicht angenommen werden: " + (err.error || resp.status));
+      myPc.close();
+      if (pc === myPc) pc = null;
+      showIdle();
+      return;
+    }
+    const answer = await resp.json();
+    await myPc.setRemoteDescription(answer);
+    showActive();
+  } catch (e) {
+    alert("Annehmen fehlgeschlagen: " + describeCallError(e));
+    if (myPc) myPc.close();
+    if (pc === myPc) pc = null;
+    showIdle();
+  } finally {
+    callBusy = false;
+    document.getElementById("btn-answer").disabled = false;
+  }
+}
+
+async function declineCall() {
+  showIdle();
+  await fetch("call/decline", { method: "POST" });
+}
+
+async function hangupCall() {
+  await fetch("call/hangup", { method: "POST" });
+  if (pc) { pc.close(); pc = null; }
+  showIdle();
+}
+
+async function dialCall() {
+  if (callBusy) return;
+  const number = document.getElementById("dial-number").value.trim();
+  if (!number) { alert("Bitte eine Rufnummer eingeben."); return; }
+  if (!checkMicSupport()) return;
+  callBusy = true;
+  document.getElementById("btn-dial").disabled = true;
+  let myPc = null;
+  try {
+    myPc = await createLocalOffer();
+    pc = myPc;
+
+    document.getElementById("active-text").textContent = "Rufe an: " + number + " ...";
+    document.getElementById("ringing-banner").style.display = "none";
+    document.getElementById("active-banner").style.display = "block";
+    document.getElementById("idle-text").style.display = "none";
+
+    const resp = await fetch("call/dial", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ number: number, sdp: myPc.localDescription.sdp, type: myPc.localDescription.type }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      alert("Anruf fehlgeschlagen: " + (err.error || resp.status));
+      myPc.close();
+      if (pc === myPc) pc = null;
+      showIdle();
+      return;
+    }
+    const answer = await resp.json();
+    await myPc.setRemoteDescription(answer);
+    document.getElementById("active-text").textContent = "Verbunden mit " + number;
+  } catch (e) {
+    alert("Anrufen fehlgeschlagen: " + describeCallError(e));
+    if (myPc) myPc.close();
+    if (pc === myPc) pc = null;
+    showIdle();
+  } finally {
+    callBusy = false;
+    document.getElementById("btn-dial").disabled = false;
+  }
+}
+
+document.getElementById("btn-answer").addEventListener("click", answerCall);
+document.getElementById("btn-decline").addEventListener("click", declineCall);
+document.getElementById("btn-hangup").addEventListener("click", hangupCall);
+document.getElementById("btn-dial").addEventListener("click", dialCall);
+setInterval(poll, 1500);
+poll();
+</script>
+"""
 
     return f"""<!DOCTYPE html>
 <html lang="de">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>UniFi Talk Softphone</title>
 <style>{PAGE_STYLE}</style>
 </head>
 <body>
 <h1>&#128222; UniFi Talk Softphone</h1>
-<div class="sub">Anrufer-Übersicht &amp; SIP-Setup</div>
+<div class="sub">Anrufer-Übersicht, Telefonie &amp; SIP-Setup</div>
 
 <div class="card">
 <strong>Status:</strong> {status_html}
 </div>
+
+{calling_card}
 
 <div class="card">
 <h2 style="margin-top:0;font-size:1.1rem;">Anruf-Historie</h2>
@@ -225,9 +583,16 @@ weiter normal klingeln.</li>
 <code>fs_cli -x "user_data 0007@talk.com param password"</code></li>
 <li><strong>In der Add-on-Konfiguration eintragen:</strong> <code>talk_sip_host</code>
 (Management-IP der Console), <code>sip_extension</code>, <code>sip_password</code>.</li>
+<li>Für Telefonie von unterwegs zusätzlich einen TURN-Key im
+<a href="https://dash.cloudflare.com/?to=/:account/calls" target="_blank" rel="noopener">
+Cloudflare Dashboard (Realtime/Calls → TURN)</a> anlegen und Token-ID/API-Token als
+<code>cf_turn_key_id</code>/<code>cf_turn_api_token</code> eintragen - kein Router
+nötig.</li>
 <li>Add-on speichern und <strong>neu starten</strong>.</li>
 </ol>
 </div>
+
+{calling_script}
 </body>
 </html>"""
 
@@ -242,10 +607,114 @@ async def api_calls(request):
     return web.json_response({"status": STATUS, "calls": list(reversed(calls))})
 
 
-def build_dashboard_app():
+async def api_ringing(request):
+    ringing = SIP_CLIENT.get_ringing_call() if SIP_CLIENT else None
+    active = bool(SIP_CLIENT and SIP_CLIENT.active_call)
+    return web.json_response({"ringing": ringing, "active": active})
+
+
+async def api_ice_servers(request):
+    servers = await fetch_cf_ice_servers(request.app["http"])
+    return web.json_response(servers)
+
+
+async def webrtc_offer(request):
+    global ACTIVE_CALL_SESSION
+    if not ENABLE_CALLING or not SIP_CLIENT:
+        return web.json_response({"error": "Telefonie-Funktion ist deaktiviert"}, status=404)
+    if not SIP_CLIENT.get_ringing_call():
+        return web.json_response({"error": "Es klingelt gerade kein Anruf"}, status=409)
+
+    try:
+        data = await request.json()
+    except json.JSONDecodeError:
+        return web.json_response({"error": "Ungueltiges JSON"}, status=400)
+
+    try:
+        rtp = await SIP_CLIENT.answer_ringing_call()
+    except RuntimeError as e:
+        log.warning("Anruf konnte nicht angenommen werden: %s", e)
+        return web.json_response({"error": str(e)}, status=409)
+
+    payload_type = SIP_CLIENT.active_call["payload_type"]
+    cf_servers = await fetch_cf_ice_servers(request.app["http"])
+    ice_servers = webrtc_bridge.ice_servers_from_cloudflare(cf_servers)
+    call = webrtc_bridge.CallSession(rtp, payload_type, ice_servers)
+    try:
+        answer_sdp, answer_type = await call.accept_offer(data["sdp"], data["type"])
+    except Exception as e:
+        log.exception("WebRTC-Verhandlung fuer eingehenden Anruf fehlgeschlagen")
+        await call.close()
+        return web.json_response({"error": f"WebRTC-Verhandlung fehlgeschlagen: {e}"}, status=500)
+
+    ACTIVE_CALL_SESSION = call
+    return web.json_response({"sdp": answer_sdp, "type": answer_type})
+
+
+async def call_dial(request):
+    """Startet einen ausgehenden Anruf: SIP_CLIENT.dial() haelt die Anfrage
+    offen, bis die Gegenseite abnimmt/ablehnt oder ein Timeout eintritt (bis
+    zu 40s) - das Frontend zeigt waehrenddessen "Rufe an ..." (siehe
+    dialCall() im Dashboard-Skript)."""
+    global ACTIVE_CALL_SESSION
+    if not ENABLE_CALLING or not SIP_CLIENT:
+        return web.json_response({"error": "Telefonie-Funktion ist deaktiviert"}, status=404)
+
+    try:
+        data = await request.json()
+    except json.JSONDecodeError:
+        return web.json_response({"error": "Ungueltiges JSON"}, status=400)
+
+    number = (data.get("number") or "").strip()
+    if not number:
+        return web.json_response({"error": "Keine Rufnummer angegeben"}, status=400)
+
+    try:
+        rtp = await SIP_CLIENT.dial(number)
+    except RuntimeError as e:
+        log.warning("Ausgehender Anruf zu %s fehlgeschlagen: %s", number, e)
+        return web.json_response({"error": str(e)}, status=502)
+
+    payload_type = SIP_CLIENT.active_call["payload_type"]
+    cf_servers = await fetch_cf_ice_servers(request.app["http"])
+    ice_servers = webrtc_bridge.ice_servers_from_cloudflare(cf_servers)
+    call = webrtc_bridge.CallSession(rtp, payload_type, ice_servers)
+    try:
+        answer_sdp, answer_type = await call.accept_offer(data["sdp"], data["type"])
+    except Exception as e:
+        log.exception("WebRTC-Verhandlung fuer ausgehenden Anruf fehlgeschlagen")
+        await call.close()
+        await SIP_CLIENT.hangup_active_call()
+        return web.json_response({"error": f"WebRTC-Verhandlung fehlgeschlagen: {e}"}, status=500)
+
+    ACTIVE_CALL_SESSION = call
+    return web.json_response({"sdp": answer_sdp, "type": answer_type})
+
+
+async def call_decline(request):
+    if SIP_CLIENT:
+        SIP_CLIENT.decline_ringing_call()
+    return web.json_response({"ok": True})
+
+
+async def call_hangup(request):
+    if SIP_CLIENT:
+        await SIP_CLIENT.hangup_active_call()
+    await _close_active_call_session()
+    return web.json_response({"ok": True})
+
+
+def build_dashboard_app(http_session):
     app = web.Application()
+    app["http"] = http_session
     app.router.add_get("/", dashboard_page)
     app.router.add_get("/api/calls", api_calls)
+    app.router.add_get("/api/ringing", api_ringing)
+    app.router.add_get("/api/ice-servers", api_ice_servers)
+    app.router.add_post("/webrtc/offer", webrtc_offer)
+    app.router.add_post("/call/dial", call_dial)
+    app.router.add_post("/call/decline", call_decline)
+    app.router.add_post("/call/hangup", call_hangup)
     return app
 
 
@@ -256,6 +725,11 @@ async def main():
         log.error(
             "talk_sip_host, sip_extension und sip_password muessen konfiguriert sein - "
             "siehe Dokumentations-Tab (DOCS.md) fuer die Einrichtung.",
+        )
+    if ENABLE_CALLING and not (CF_TURN_KEY_ID and CF_TURN_API_TOKEN):
+        log.warning(
+            "cf_turn_key_id/cf_turn_api_token nicht konfiguriert - Annehmen/Telefonieren "
+            "funktioniert dadurch nur im selben LAN wie dieser Add-on-Host.",
         )
 
     timeout = aiohttp.ClientTimeout(total=10)
@@ -275,12 +749,13 @@ async def main():
             call_handling=CALL_HANDLING,
             on_call=on_call,
             on_registered=_on_registered,
+            on_hangup=_on_hangup,
         )
 
         if TALK_SIP_HOST and SIP_EXTENSION and SIP_PASSWORD:
             await SIP_CLIENT.start()
 
-        dashboard_runner = web.AppRunner(build_dashboard_app())
+        dashboard_runner = web.AppRunner(build_dashboard_app(http_session))
         await dashboard_runner.setup()
         await web.TCPSite(dashboard_runner, "0.0.0.0", 8100).start()
         log.info("Dashboard (nur via Ingress) auf Port 8100 gestartet")
@@ -288,6 +763,7 @@ async def main():
         try:
             await asyncio.Event().wait()
         finally:
+            await _close_active_call_session()
             await SIP_CLIENT.stop()
             await dashboard_runner.cleanup()
 
