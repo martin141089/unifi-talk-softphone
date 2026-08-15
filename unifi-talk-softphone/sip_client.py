@@ -223,6 +223,31 @@ def _build_sdp_answer(local_ip, rtp_port, payload_type):
     )
 
 
+def _build_sdp_offer(local_ip, rtp_port, payload_types):
+    """Wie _build_sdp_answer, bietet aber mehrere Codecs zur Auswahl an - fuer
+    ein eigenes INVITE (dial()). Deutsche PSTN-Gateways/Provider-Trunks
+    erwarten ueblicherweise A-law (PCMA) statt des in Nordamerika ueblichen
+    Mu-law (PCMU); bietet man nur PCMU an, kann die Gegenseite trotzdem
+    intern A-law-kodierte Pakete zurueckschicken (Bridging-/Transcoding-
+    Eigenheit mancher B2BUAs) - das klingt dann wie lautes, unverstaendliches
+    Rauschen, wenn man es faelschlich als Mu-law dekodiert. dial() liest den
+    tatsaechlich in der Antwort-SDP gewaehlten Codec aus, statt ihn wie vorher
+    fix auf PCMU anzunehmen."""
+    session_id = int(time.time())
+    pt_list = " ".join(str(pt) for pt in payload_types)
+    rtpmaps = "".join(f"a=rtpmap:{pt} {_CODEC_NAMES[pt]}/8000\r\n" for pt in payload_types)
+    return (
+        f"v=0\r\n"
+        f"o=unifitalksoftphone {session_id} {session_id} IN IP4 {local_ip}\r\n"
+        f"s=unifi-talk-softphone\r\n"
+        f"c=IN IP4 {local_ip}\r\n"
+        f"t=0 0\r\n"
+        f"m=audio {rtp_port} RTP/AVP {pt_list}\r\n"
+        f"{rtpmaps}"
+        f"a=sendrecv\r\n"
+    )
+
+
 class RtpSession(asyncio.DatagramProtocol):
     """Ein einzelner RTP-Audio-Strom (G.711) fuer die Telefonie-Seite eines
     aktiven Anrufs. Empfangene Payload-Bytes landen in recv_queue (fuer die
@@ -689,7 +714,10 @@ class SipClient:
         rtp = await _create_rtp_session(self.host, self.port, PCMU)
         try:
             local_rtp_port = rtp.transport.get_extra_info("sockname")[1]
-            offer_body = _build_sdp_answer(self.local_ip, local_rtp_port, PCMU)
+            # Beide G.711-Varianten anbieten, nicht nur PCMU - siehe
+            # _build_sdp_offer() fuer den Hintergrund (deutsche PSTN-Gateways
+            # erwarten ueblicherweise A-law/PCMA).
+            offer_body = _build_sdp_offer(self.local_ip, local_rtp_port, [PCMU, PCMA])
 
             call_id = _gen_token(16) + "@unifi-talk-softphone"
             from_tag = _gen_token(10)
@@ -756,6 +784,17 @@ class SipClient:
                 sdp = _parse_sdp(resp.body)
                 if not sdp:
                     raise RuntimeError("Keine gültige SDP-Antwort erhalten")
+                # Der tatsaechlich in der Antwort gewaehlte Codec kann von PCMU
+                # abweichen (siehe _build_sdp_offer()) - vorher war das hier
+                # fix auf PCMU angenommen, wodurch eine PCMA-Antwort mit dem
+                # falschen Dekoder als lautes, unverstaendliches Rauschen
+                # ankam statt als Sprache.
+                payload_type = next((pt for pt in (PCMU, PCMA) if pt in sdp["payload_types"]), None)
+                if payload_type is None:
+                    raise RuntimeError("Keine unterstuetzte Codec (PCMU/PCMA) in der SDP-Antwort")
+                if payload_type != PCMU:
+                    log.info("Gegenseite hat Codec %s gewaehlt (statt PCMU)", _CODEC_NAMES[payload_type])
+                rtp.payload_type = payload_type
                 # Siehe Kommentar in answer_ringing_call() - self.host statt der
                 # von der Console gemeldeten SDP-IP verwenden, falls abweichend.
                 if sdp["ip"] != self.host:
@@ -772,7 +811,7 @@ class SipClient:
                     "caller": {"number": number, "name": ""},
                     "received_at": time.time(),
                     "rtp": rtp,
-                    "payload_type": PCMU,
+                    "payload_type": payload_type,
                 }
                 return rtp
             finally:

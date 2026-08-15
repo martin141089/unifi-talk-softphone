@@ -2,6 +2,26 @@
 
 Alle nennenswerten Änderungen an diesem Add-on werden hier dokumentiert.
 
+## [0.5.3]
+
+### Behoben
+- **Ursache für "lautes, unverständliches Rauschen" bei ausgehenden Anrufen
+  gefunden und behoben.** Die 0.5.2-Diagnosezähler zeigten, dass bei einem
+  Testanruf durchgehend RTP-Pakete in beide Richtungen ankamen (kein
+  Netzwerk-/Firewall-Problem) - der Ton war aber unverständliches Rauschen,
+  nicht Stille. Ursache: `dial()` bot zwar nur PCMU (Mu-law) in der eigenen
+  SDP an, nahm für die eigentliche Kodierung/Dekodierung aber unabhängig von
+  der tatsächlichen Antwort **fix PCMU** an. Antwortet die Gegenseite (bei
+  einem ausgehenden Anruf über den PSTN-Gateway-Trunk auch dann, wenn intern
+  auf A-law/PCMA umgeschaltet wird) mit einem anderen Codec, wurden dessen
+  A-law-kodierte Bytes fälschlich als Mu-law dekodiert - klingt exakt wie
+  lautes, unverständliches Rauschen. `dial()` bietet jetzt beide G.711-
+  Varianten an (PCMU **und** PCMA, wie es `answer_ringing_call()` für
+  eingehende Anrufe schon immer tat) und übernimmt für Kodierung/Dekodierung
+  den in der SDP-Antwort tatsächlich gewählten Codec, statt ihn anzunehmen.
+  Mit einem gezielten Test nachgestellt (simulierte Antwort mit PCMA statt
+  PCMU) und bestätigt.
+
 ## [0.5.2]
 
 ### Diagnose
