@@ -617,7 +617,16 @@ class SipClient:
         if payload_type is None:
             raise RuntimeError("Keine unterstuetzte Codec (PCMU/PCMA) angeboten")
 
-        rtp = await _create_rtp_session(sdp["ip"], sdp["port"], payload_type)
+        # Die Console meldet in ihrer SDP manchmal eine andere IP (z.B. ihre
+        # oeffentliche WAN-IP) als self.host, obwohl sie fuer diese Extension
+        # ausschliesslich im LAN erreichbar ist - ohne NAT-Hairpinning am
+        # Router kommt dann kein RTP an (stumme Verbindung trotz erfolgreicher
+        # Signalisierung). self.host ist bereits nachweislich erreichbar (dort
+        # laeuft die SIP-Signalisierung drueber), daher wird er statt der
+        # SDP-IP fuer das RTP-Ziel verwendet - nur der Port kommt aus der SDP.
+        if sdp["ip"] != self.host:
+            log.info("SDP meldet RTP-IP %s, verwende stattdessen %s (talk_sip_host)", sdp["ip"], self.host)
+        rtp = await _create_rtp_session(self.host, sdp["port"], payload_type)
         local_rtp_port = rtp.transport.get_extra_info("sockname")[1]
 
         answer_body = _build_sdp_answer(self.local_ip, local_rtp_port, payload_type)
@@ -725,7 +734,11 @@ class SipClient:
                 sdp = _parse_sdp(resp.body)
                 if not sdp:
                     raise RuntimeError("Keine gültige SDP-Antwort erhalten")
-                rtp.remote_addr = (sdp["ip"], sdp["port"])
+                # Siehe Kommentar in answer_ringing_call() - self.host statt der
+                # von der Console gemeldeten SDP-IP verwenden, falls abweichend.
+                if sdp["ip"] != self.host:
+                    log.info("SDP meldet RTP-IP %s, verwende stattdessen %s (talk_sip_host)", sdp["ip"], self.host)
+                rtp.remote_addr = (self.host, sdp["port"])
 
                 to_header = resp.get("To")
                 self._send(self._build_ack(target_uri, our_uri, from_tag, to_header, call_id, cseq))
