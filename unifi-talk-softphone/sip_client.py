@@ -237,14 +237,27 @@ class RtpSession(asyncio.DatagramProtocol):
         self._seq = random.randint(0, 0xFFFF)
         self._timestamp = random.randint(0, 0xFFFFFFFF)
         self._ssrc = random.randint(0, 0xFFFFFFFF)
+        # Reine Zaehler fuer die Diagnose "kein Ton trotz erfolgreicher
+        # Signalisierung" - ohne die ist von aussen nicht unterscheidbar, ob
+        # ueberhaupt RTP-Pakete rausgehen/ankommen oder ob das Problem erst
+        # in der WebRTC-Bruecke/Browser-Wiedergabe liegt.
+        self._sent_count = 0
+        self._recv_count = 0
 
     def connection_made(self, transport):
         self.transport = transport
+        local = transport.get_extra_info("sockname")
+        log.info("RTP-Session lokal auf %s gebunden, Ziel %s", local, self.remote_addr)
 
     def datagram_received(self, data, addr):
         if len(data) < 12:
             return
         payload = data[12:]
+        self._recv_count += 1
+        if self._recv_count == 1:
+            log.info("RTP: erstes Paket empfangen von %s (%d Bytes Payload)", addr, len(payload))
+        elif self._recv_count % 250 == 0:
+            log.info("RTP: %d Pakete von %s empfangen bisher", self._recv_count, addr)
         if self.recv_queue.full():
             try:
                 self.recv_queue.get_nowait()
@@ -266,10 +279,19 @@ class RtpSession(asyncio.DatagramProtocol):
             self._seq & 0xFFFF, self._timestamp & 0xFFFFFFFF, self._ssrc,
         )
         self.transport.sendto(header + payload, self.remote_addr)
+        self._sent_count += 1
+        if self._sent_count == 1:
+            log.info("RTP: erstes Paket gesendet an %s", self.remote_addr)
+        elif self._sent_count % 250 == 0:
+            log.info("RTP: %d Pakete an %s gesendet bisher", self._sent_count, self.remote_addr)
         self._seq = (self._seq + 1) & 0xFFFF
         self._timestamp = (self._timestamp + samples) & 0xFFFFFFFF
 
     def close(self):
+        log.info(
+            "RTP-Session beendet (Ziel %s): %d Pakete gesendet, %d empfangen",
+            self.remote_addr, self._sent_count, self._recv_count,
+        )
         if self.transport:
             self.transport.close()
 
